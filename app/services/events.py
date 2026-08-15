@@ -8,7 +8,15 @@ from app.core.timeutil import ensure_aware, expand_occurrences
 from app.models.event import Event, EventMember, EventReminder
 from app.models.family import FamilyMember
 from app.models.user import User
+from app.realtime.hub import hub
 from app.schemas.event import EventCreate, EventOut, EventUpdate
+
+
+def _broadcast_event(event: Event, type_: str) -> None:
+    hub.broadcast(
+        event.family_id,
+        {"type": type_, "event": event_to_out(event).model_dump(mode="json")},
+    )
 
 
 def event_to_out(event: Event, occurrence_starts_at: datetime | None = None) -> EventOut:
@@ -64,6 +72,7 @@ def create_event(db: Session, family_id: UUID, user: User, data: EventCreate) ->
         db.add(EventReminder(event_id=event.id, minutes_before=minutes))
     db.commit()
     db.refresh(event)
+    _broadcast_event(event, "event.created")
     return event
 
 
@@ -134,9 +143,13 @@ def update_event(db: Session, event: Event, data: EventUpdate) -> Event:
     event.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(event)
+    _broadcast_event(event, "event.updated")
     return event
 
 
 def delete_event(db: Session, event: Event) -> None:
+    family_id = event.family_id
+    event_id = event.id
     db.delete(event)
     db.commit()
+    hub.broadcast(family_id, {"type": "event.deleted", "event_id": str(event_id)})

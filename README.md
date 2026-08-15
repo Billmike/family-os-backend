@@ -7,7 +7,7 @@ Client-agnostic backend for FamilyOS v0.1 (FastAPI + PostgreSQL).
 - FastAPI, Pydantic, SQLAlchemy 2
 - PostgreSQL 16
 - Alembic migrations
-- WebSockets (shopping realtime)
+- WebSockets (family realtime: events, tasks, shopping)
 - Web Push (VAPID) + reminder scheduler
 
 ## Quick start (Docker)

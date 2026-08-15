@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import auth, dashboard, events, families, notifications, shopping, tasks, ws
 from app.core.config import get_settings
 from app.core.exceptions import error_body
+from app.realtime.hub import hub
 from app.workers.reminders import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
@@ -18,10 +20,12 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    hub.bind_loop(asyncio.get_running_loop())
     if settings.environment != "test":
         start_scheduler()
     yield
     stop_scheduler()
+    hub.bind_loop(None)
 
 
 app = FastAPI(

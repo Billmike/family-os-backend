@@ -13,6 +13,10 @@ class ConnectionHub:
     def __init__(self) -> None:
         self._rooms: dict[UUID, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        self._loop = loop
 
     async def connect(self, family_id: UUID, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -28,11 +32,19 @@ class ConnectionHub:
                 self._rooms.pop(family_id, None)
 
     def broadcast(self, family_id: UUID, message: dict) -> None:
-        """Schedule async broadcast from sync request handlers."""
+        """Schedule async broadcast from the event loop or a sync worker thread."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.debug("No running loop for broadcast")
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                logger.warning("No event loop for WebSocket broadcast")
+                return
+            future = asyncio.run_coroutine_threadsafe(self._broadcast(family_id, message), loop)
+            try:
+                future.result(timeout=5)
+            except Exception:
+                logger.exception("WebSocket broadcast failed")
             return
         loop.create_task(self._broadcast(family_id, message))
 

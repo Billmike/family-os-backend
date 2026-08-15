@@ -466,6 +466,8 @@ Auth + membership.
 }
 ```
 
+Also broadcasts WebSocket `event.created` on the family channel.
+
 ---
 
 ### `PATCH /api/events/{event_id}`
@@ -474,13 +476,13 @@ Auth + membership in the event’s family.
 
 **Request** — any subset of create fields (`member_ids`, `reminder_minutes`, etc.).
 
-**Response `200`** — `EventOut`.
+**Response `200`** — `EventOut`. Also broadcasts WebSocket `event.updated`.
 
 ---
 
 ### `DELETE /api/events/{event_id}`
 
-**Response `204`**.
+**Response `204`**. Broadcasts `{ "type": "event.deleted", "event_id": "..." }`.
 
 ---
 
@@ -546,13 +548,15 @@ Auth + membership.
 
 Incomplete ⇒ `completed_at: null`. Completed ⇒ ISO timestamp.
 
+Also broadcasts WebSocket `task.created` on the family channel.
+
 ---
 
 ### `PATCH /api/tasks/{task_id}`
 
 **Request** — optional fields from create, plus `completed_at`.
 
-**Response `200`** — `TaskOut`.
+**Response `200`** — `TaskOut`. Also broadcasts WebSocket `task.updated`.
 
 ---
 
@@ -560,13 +564,13 @@ Incomplete ⇒ `completed_at: null`. Completed ⇒ ISO timestamp.
 
 No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** occurrence as a new open task.
 
-**Response `200`** — completed `TaskOut`.
+**Response `200`** — completed `TaskOut`. Broadcasts `task.updated` for the completed row, and `task.created` for the next occurrence when one is created.
 
 ---
 
 ### `DELETE /api/tasks/{task_id}`
 
-**Response `204`**.
+**Response `204`**. Broadcasts `{ "type": "task.deleted", "task_id": "..." }`.
 
 ---
 
@@ -774,7 +778,7 @@ Auth required (current user’s notifications).
 
 ---
 
-## WebSocket (realtime shopping)
+## WebSocket (realtime family channel)
 
 ### `WS /api/ws/families/{family_id}?token=<access_token>`
 
@@ -785,36 +789,61 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 ```
 
 - Auth via query `token` (JWT access token). Invalid → close `4401`. Not a member → close `4403`.
-- Server pushes JSON text frames. Client may send any text as keep-alive (ignored).
+- Server pushes JSON text frames after successful mutations. Client may send any text as keep-alive (ignored).
+- Reconnect after a drop and refetch REST lists — frames are not replayed.
 
-**Example server messages**
+**Shopping**
 
 ```json
 {
   "type": "shopping.item.created",
-  "item": { /* ShoppingItemOut */ }
+  "item": { }
 }
 ```
 
-```json
-{
-  "type": "shopping.item.completed",
-  "item": { /* ShoppingItemOut */ }
-}
-```
-
-```json
-{
-  "type": "shopping.item.updated",
-  "item": { /* ShoppingItemOut */ }
-}
-```
+`shopping.item.updated` and `shopping.item.completed` use the same `{ item }` shape.
 
 ```json
 {
   "type": "shopping.item.updated",
   "item_id": "...",
   "deleted": true
+}
+```
+
+**Events**
+
+```json
+{
+  "type": "event.created",
+  "event": { }
+}
+```
+
+`event.updated` uses the same `{ event }` shape (`occurrence_starts_at` is `null`; expand recurring series via `GET /events`).
+
+```json
+{
+  "type": "event.deleted",
+  "event_id": "..."
+}
+```
+
+**Tasks**
+
+```json
+{
+  "type": "task.created",
+  "task": { }
+}
+```
+
+`task.updated` uses the same `{ task }` shape.
+
+```json
+{
+  "type": "task.deleted",
+  "task_id": "..."
 }
 ```
 
@@ -826,7 +855,7 @@ const ws = new WebSocket(
 );
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
-  // update shopping UI from msg
+  // upsert/delete local events, tasks, and shopping from msg.type
 };
 ```
 
@@ -843,9 +872,9 @@ Use `ws://` locally and `wss://` in production.
    - or POST /api/invitations/{token}/accept
 3. Pick family_id; GET /api/families/{id}/dashboard
 4. Wire screens:
-   - Calendar → events
-   - Tasks → tasks (+ complete)
-   - Shopping → lists/items + WebSocket
+   - Calendar → events + family WebSocket
+   - Tasks → tasks (+ complete) + family WebSocket
+   - Shopping → lists/items + family WebSocket
    - Notifications → notifications + preferences
 5. On 401 → POST /api/auth/refresh → retry
 ```

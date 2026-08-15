@@ -9,8 +9,16 @@ from app.core.timeutil import ensure_aware, next_occurrence
 from app.models.family import FamilyMember
 from app.models.task import Task, TaskAssignee
 from app.models.user import User
+from app.realtime.hub import hub
 from app.schemas.task import TaskCreate, TaskOut, TaskUpdate
 from app.services import notifications as notification_service
+
+
+def _broadcast_task(task: Task, type_: str) -> None:
+    hub.broadcast(
+        task.family_id,
+        {"type": type_, "task": task_to_out(task).model_dump(mode="json")},
+    )
 
 
 def task_to_out(task: Task) -> TaskOut:
@@ -67,6 +75,7 @@ def create_task(
         db.add(TaskAssignee(task_id=task.id, family_member_id=aid))
     db.commit()
     db.refresh(task)
+    _broadcast_task(task, "task.created")
     notification_service.notify_task_assigned(
         db, task, actor_user_id=user.id, background_tasks=background_tasks
     )
@@ -131,6 +140,7 @@ def update_task(db: Session, task: Task, data: TaskUpdate) -> Task:
     task.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(task)
+    _broadcast_task(task, "task.updated")
     return task
 
 
@@ -161,9 +171,16 @@ def complete_task(db: Session, task: Task, user: User) -> Task:
                 db.add(TaskAssignee(task_id=next_task.id, family_member_id=a.family_member_id))
     db.commit()
     db.refresh(task)
+    _broadcast_task(task, "task.updated")
+    if next_task is not None:
+        db.refresh(next_task)
+        _broadcast_task(next_task, "task.created")
     return task
 
 
 def delete_task(db: Session, task: Task) -> None:
+    family_id = task.family_id
+    task_id = task.id
     db.delete(task)
     db.commit()
+    hub.broadcast(family_id, {"type": "task.deleted", "task_id": str(task_id)})
