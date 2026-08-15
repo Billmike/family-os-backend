@@ -97,11 +97,58 @@ def _vapid_sub_claim() -> str:
     return "mailto:admin@familyos.app"
 
 
+def _unwrap_env_secret(raw: str) -> str:
+    key = raw.strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1].strip()
+    # PaaS panels often store PEM as one line with escaped newlines.
+    while "\\\\n" in key:
+        key = key.replace("\\\\n", "\\n")
+    key = key.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    return key.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _rewrap_pem(pem: str) -> str:
+    """Rebuild a PEM block when env mangling removed or replaced newlines."""
+    import re
+
+    match = re.search(
+        r"-----BEGIN ([A-Z0-9 ]+)-----([A-Za-z0-9+/=\s]+)-----END \1-----",
+        pem,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return pem
+    label = match.group(1)
+    body = re.sub(r"\s+", "", match.group(2))
+    if not body:
+        return pem
+    lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+    return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----\n"
+
+
 def _vapid_private_key() -> str:
-    """Normalize PEM from env (quoted / literal \\n common on PaaS secret stores)."""
-    key = (settings.vapid_private_key or "").strip().strip('"').strip("'")
-    if "\\n" in key and "\n" not in key:
-        key = key.replace("\\n", "\n")
+    """Normalize PEM from env (quoted / literal \\n / single-line PEM)."""
+    key = _unwrap_env_secret(settings.vapid_private_key or "")
+    if "BEGIN" in key:
+        key = _rewrap_pem(key)
+    return key
+
+
+def _validated_vapid_private_key() -> str:
+    """Return a loadable VAPID private key PEM, or raise ValueError."""
+    key = _vapid_private_key()
+    if not key:
+        raise ValueError("VAPID_PRIVATE_KEY is empty")
+    try:
+        from cryptography.hazmat.primitives import serialization
+
+        serialization.load_pem_private_key(key.encode(), password=None)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "VAPID_PRIVATE_KEY could not be parsed. Use a full PKCS#8 PEM and preserve newlines "
+            "(or a single line with \\n escapes)."
+        ) from exc
     return key
 
 
@@ -316,25 +363,37 @@ def get_vapid_public_key() -> str | None:
     return key or None
 
 
-def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> int:
-    """Deliver web push to all of the user's subscriptions. Returns successful send count."""
-    private_key = _vapid_private_key()
-    public_key = (settings.vapid_public_key or "").strip().strip('"').strip("'")
-    if not private_key or not public_key:
-        logger.warning("VAPID keys not configured; skipping push")
-        return 0
+def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
+    """Deliver web push to all of the user's subscriptions.
+
+    Returns ``{"sent": int, "subscriptions": int, "error": str | None}``.
+    """
+    public_key = _unwrap_env_secret(settings.vapid_public_key or "")
+    try:
+        private_key = _validated_vapid_private_key()
+    except ValueError as exc:
+        logger.warning("%s", exc)
+        return {"sent": 0, "subscriptions": 0, "error": str(exc)}
+    if not public_key:
+        logger.warning("VAPID_PUBLIC_KEY not configured; skipping push")
+        return {"sent": 0, "subscriptions": 0, "error": "VAPID_PUBLIC_KEY is empty"}
     try:
         from pywebpush import WebPushException, webpush
     except ImportError:
         logger.warning("pywebpush not available")
-        return 0
+        return {"sent": 0, "subscriptions": 0, "error": "pywebpush not available"}
 
     subs = db.query(PushSubscription).filter(PushSubscription.user_id == user_id).all()
     if not subs:
         logger.info("No push subscriptions for user %s", user_id)
-        return 0
+        return {
+            "sent": 0,
+            "subscriptions": 0,
+            "error": "No push subscription stored for this account",
+        }
     vapid_claims = {"sub": _vapid_sub_claim()}
     sent = 0
+    last_error: str | None = None
     for sub in subs:
         try:
             validate_push_endpoint(sub.endpoint)
@@ -364,15 +423,22 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> int:
                 db.delete(sub)
                 db.commit()
             else:
+                last_error = str(exc)
                 logger.warning("Push failed for %s: %s", sub.id, exc)
         except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
             logger.warning("Push failed for %s: %s", sub.id, exc)
     if sent:
         logger.info("Sent web push to %s/%s subscriptions for user %s", sent, len(subs), user_id)
-    return sent
+        return {"sent": sent, "subscriptions": len(subs), "error": None}
+    return {
+        "sent": 0,
+        "subscriptions": len(subs),
+        "error": last_error or "Push delivery failed for all subscriptions",
+    }
 
 
-def send_test_push(db: Session, user_id: UUID) -> int:
+def send_test_push(db: Session, user_id: UUID) -> dict:
     return send_push_to_user(
         db,
         user_id,

@@ -4,15 +4,28 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 
 from app.core.exceptions import AppError
 from app.core.config import Settings, validate_jwt_secret
 from app.services.notifications import (
     PUSH_TIMEOUT_SECONDS,
+    _rewrap_pem,
+    _validated_vapid_private_key,
+    _vapid_private_key,
     _vapid_sub_claim,
     send_push_to_user,
     validate_push_endpoint,
 )
+
+# Deterministic test key (not used outside unit tests).
+VALID_VAPID_PEM = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg6V+s/SBSPbr7BFoM
+YzHL9q0Ze/B5tQ6u6rfMuc4yVJqhRANCAARg5gyhIHJtuOZ2EM5/f3hnZncQrlRV
+9KYltk6X10g9IH42l6gu63SNm+1lmqZn1EaqRFZ+7BFL0QROeczcMcVE
+-----END PRIVATE KEY-----
+"""
+VALID_VAPID_PUBLIC = "BGDmDKEgcm245nYQzn9_eGdmdxCuVFX0piW2TpfXSD0gfjaXqC7rdI2b7WWapmfURqpEVn7sEUvRBE55zNwxxUQ"
 
 
 def test_validate_jwt_secret_rejects_known_placeholders() -> None:
@@ -70,10 +83,52 @@ def test_vapid_sub_claim_keeps_mailto(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _vapid_sub_claim() == "mailto:user@example.com"
 
 
+def test_vapid_private_key_rewrites_single_line_pem(monkeypatch: pytest.MonkeyPatch) -> None:
+    single_line = VALID_VAPID_PEM.replace("\n", "")
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_private_key=single_line),
+    )
+    normalized = _vapid_private_key()
+    assert "\n" in normalized
+    serialization.load_pem_private_key(normalized.encode(), password=None)
+
+
+def test_vapid_private_key_rewrites_escaped_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    escaped = VALID_VAPID_PEM.replace("\n", "\\n")
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_private_key=f'"{escaped}"'),
+    )
+    normalized = _validated_vapid_private_key()
+    serialization.load_pem_private_key(normalized.encode(), password=None)
+
+
+def test_vapid_private_key_rewrites_space_separated_pem(monkeypatch: pytest.MonkeyPatch) -> None:
+    spaced = " ".join(VALID_VAPID_PEM.split())
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_private_key=spaced),
+    )
+    normalized = _validated_vapid_private_key()
+    serialization.load_pem_private_key(normalized.encode(), password=None)
+
+
+def test_rewrap_pem_roundtrip() -> None:
+    body = "".join(VALID_VAPID_PEM.strip().split("\n")[1:-1])
+    mangled = f"-----BEGIN PRIVATE KEY-----{body}-----END PRIVATE KEY-----"
+    fixed = _rewrap_pem(mangled)
+    serialization.load_pem_private_key(fixed.encode(), password=None)
+
+
 def test_send_push_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.notifications.settings",
-        MagicMock(vapid_private_key="priv", vapid_public_key="pub", vapid_contact_email="mailto:t@t"),
+        MagicMock(
+            vapid_private_key=VALID_VAPID_PEM,
+            vapid_public_key=VALID_VAPID_PUBLIC,
+            vapid_contact_email="mailto:t@t",
+        ),
     )
     sub = MagicMock()
     sub.id = uuid4()
@@ -85,32 +140,26 @@ def test_send_push_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     db.query.return_value.filter.return_value.all.return_value = [sub]
 
     with patch("pywebpush.webpush") as webpush_mock:
-        sent = send_push_to_user(db, uuid4(), {"title": "t"})
+        result = send_push_to_user(db, uuid4(), {"title": "t"})
         webpush_mock.assert_called_once()
         assert webpush_mock.call_args.kwargs["timeout"] == PUSH_TIMEOUT_SECONDS
         assert webpush_mock.call_args.kwargs["vapid_claims"] == {"sub": "mailto:t@t"}
-        assert sent == 1
+        assert result["sent"] == 1
+        assert result["error"] is None
 
 
-def test_send_push_normalizes_escaped_pem_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
-    pem = "-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----"
+def test_send_push_reports_invalid_private_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.notifications.settings",
-        MagicMock(vapid_private_key=pem, vapid_public_key="pub", vapid_contact_email="mailto:t@t"),
+        MagicMock(
+            vapid_private_key="-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
+            vapid_public_key=VALID_VAPID_PUBLIC,
+            vapid_contact_email="mailto:t@t",
+        ),
     )
-    sub = MagicMock()
-    sub.id = uuid4()
-    sub.endpoint = "https://fcm.googleapis.com/fcm/send/abc"
-    sub.p256dh = "p"
-    sub.auth = "a"
-    db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = [sub]
-
-    with patch("pywebpush.webpush") as webpush_mock:
-        send_push_to_user(db, uuid4(), {"title": "t"})
-        used = webpush_mock.call_args.kwargs["vapid_private_key"]
-        assert "\n" in used
-        assert "\\n" not in used
+    result = send_push_to_user(MagicMock(), uuid4(), {"title": "t"})
+    assert result["sent"] == 0
+    assert "VAPID_PRIVATE_KEY" in (result["error"] or "")
 
 
 def test_send_push_removes_gone_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,7 +167,11 @@ def test_send_push_removes_gone_subscription(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(
         "app.services.notifications.settings",
-        MagicMock(vapid_private_key="priv", vapid_public_key="pub", vapid_contact_email="user@x.com"),
+        MagicMock(
+            vapid_private_key=VALID_VAPID_PEM,
+            vapid_public_key=VALID_VAPID_PUBLIC,
+            vapid_contact_email="user@x.com",
+        ),
     )
     sub = MagicMock()
     sub.id = uuid4()
@@ -131,6 +184,6 @@ def test_send_push_removes_gone_subscription(monkeypatch: pytest.MonkeyPatch) ->
 
     response = MagicMock(status_code=410)
     with patch("pywebpush.webpush", side_effect=WebPushException("gone", response=response)):
-        sent = send_push_to_user(db, uuid4(), {"title": "t"})
+        result = send_push_to_user(db, uuid4(), {"title": "t"})
     db.delete.assert_called_once_with(sub)
-    assert sent == 0
+    assert result["sent"] == 0

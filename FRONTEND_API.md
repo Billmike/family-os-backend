@@ -802,10 +802,10 @@ Auth required. Sends a test web push to every stored subscription for the curren
 **Response `200`**
 
 ```json
-{ "sent": 1 }
+{ "sent": 1, "subscriptions": 1, "error": null }
 ```
 
-`sent` is the number of subscriptions that accepted the message. `0` usually means no subscription is stored — toggle push off/on on the device.
+`sent` is the number of subscriptions that accepted the message. When `sent` is `0`, `error` explains why (missing subscription, malformed `VAPID_PRIVATE_KEY`, provider rejection, etc.).
 
 ---
 

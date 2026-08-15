@@ -99,5 +99,4 @@ def push_test(
     db: Session = Depends(get_db),
 ) -> dict:
     """Send a test web push to the current user's subscriptions (for device setup checks)."""
-    sent = notification_service.send_test_push(db, user.id)
-    return {"sent": sent}
+    return notification_service.send_test_push(db, user.id)
