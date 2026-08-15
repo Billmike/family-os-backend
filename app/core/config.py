@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     vapid_contact_email: str = "mailto:admin@familyos.app"
     environment: str = "development"
     invitation_expire_days: int = 7
+    public_app_url: str = "http://localhost:3000"
+    # log = stdout stub; future: resend, sendgrid, etc.
+    email_provider: str = "log"
 
     @property
     def cors_origin_list(self) -> list[str]:

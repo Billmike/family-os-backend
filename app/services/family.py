@@ -21,6 +21,7 @@ from app.schemas.family import (
     MemberCreate,
     MemberOut,
 )
+from app.services.email import try_send_invitation_email
 
 settings = get_settings()
 
@@ -146,13 +147,22 @@ def create_invitation(
     db.add(invitation)
     db.commit()
     db.refresh(invitation)
+    base = get_settings().public_app_url.rstrip("/")
+    invite_url = f"{base}/invite/{raw}"
+    if invitation.email:
+        try_send_invitation_email(
+            to=invitation.email,
+            family_name=family.name,
+            invite_url=invite_url,
+            invited_by_name=user.name,
+        )
     return InvitationOut(
         id=invitation.id,
         family_id=invitation.family_id,
         email=invitation.email,
         expires_at=invitation.expires_at,
         invite_token=raw,
-        invite_url=f"https://familyos.app/invite/{raw}",
+        invite_url=invite_url,
     )
 
 

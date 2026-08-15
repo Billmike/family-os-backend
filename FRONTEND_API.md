@@ -336,11 +336,13 @@ Both fields optional; `role` defaults to `"Parent"`.
   "email": "ade@example.com",
   "expires_at": "2026-08-22T08:48:38.919908Z",
   "invite_token": "<raw-token-show-once>",
-  "invite_url": "https://familyos.app/invite/<raw-token-show-once>"
+  "invite_url": "http://localhost:3000/invite/<raw-token-show-once>"
 }
 ```
 
 Show `invite_token` / `invite_url` to the user once. The server stores only a hash.
+
+`invite_url` is built from `PUBLIC_APP_URL` + `/invite/{token}`. If `email` is provided it is stored and a stub mailer may log the message; **email is not delivered** until a real `EMAIL_PROVIDER` is configured. Always share the link.
 
 ---
 

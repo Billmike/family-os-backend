@@ -66,6 +66,8 @@ def test_family_create_members_invite_accept(client: TestClient) -> None:
     assert invite.status_code == 200
     token = invite.json()["invite_token"]
     assert "token_hash" not in invite.json()
+    assert invite.json()["invite_url"] == f"http://localhost:3000/invite/{token}"
+    assert invite.json()["email"] == "ade@example.com"
 
     partner = auth_headers(client, "ade@example.com", name="Ade")
     accept = client.post(f"/api/invitations/{token}/accept", headers=partner)
@@ -191,6 +193,24 @@ def test_invite_token_stored_hashed_only(client: TestClient) -> None:
     assert invite["invite_token"]
     # raw token only returned once in response, not persisted as field name token
     assert "token" not in invite or invite.get("token") is None
+
+
+def test_invite_with_email_succeeds_with_logging_mailer(client: TestClient) -> None:
+    headers = auth_headers(client, "mailer-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Mail Family", "timezone": "UTC"},
+    ).json()["id"]
+    invite = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=headers,
+        json={"email": "partner@example.com"},
+    )
+    assert invite.status_code == 200
+    body = invite.json()
+    assert body["email"] == "partner@example.com"
+    assert body["invite_url"].startswith("http://localhost:3000/invite/")
 
 
 def test_invite_accept_second_use_conflict(client: TestClient) -> None:
