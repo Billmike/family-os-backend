@@ -108,6 +108,32 @@ def _unwrap_env_secret(raw: str) -> str:
     return key.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+def _decode_prefixed_secret(raw: str) -> str:
+    """Support base64url:/base64: wrappers that survive PaaS form encoding.
+
+    PEM contains ``+`` characters; many dashboards turn ``+`` into spaces and break ASN.1.
+    Prefer ``base64url:`` of the full PEM file for production env vars.
+    """
+    import base64
+    import re
+
+    key = _unwrap_env_secret(raw)
+    for prefix, urlsafe in (("base64url:", True), ("base64:", False)):
+        if not key.lower().startswith(prefix):
+            continue
+        payload = re.sub(r"\s+", "", key[len(prefix) :].strip())
+        if not urlsafe:
+            # std base64 may have had '+' turned into spaces before we stripped them;
+            # cannot recover here — prefer base64url: in production.
+            pad = "=" * ((4 - len(payload) % 4) % 4)
+            decoded = base64.b64decode(payload + pad)
+        else:
+            pad = "=" * ((4 - len(payload) % 4) % 4)
+            decoded = base64.urlsafe_b64decode(payload + pad)
+        return decoded.decode("utf-8")
+    return key
+
+
 def _rewrap_pem(pem: str) -> str:
     """Rebuild a PEM block when env mangling removed or replaced newlines."""
     import re
@@ -120,7 +146,11 @@ def _rewrap_pem(pem: str) -> str:
     if not match:
         return pem
     label = match.group(1)
-    body = re.sub(r"\s+", "", match.group(2))
+    body = match.group(2)
+    # Drop formatting newlines first, then treat remaining spaces as corrupted '+'.
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    body = "".join(part.strip() for part in body.split("\n"))
+    body = body.replace(" ", "+").replace("\t", "+")
     if not body:
         return pem
     lines = [body[i : i + 64] for i in range(0, len(body), 64)]
@@ -128,8 +158,8 @@ def _rewrap_pem(pem: str) -> str:
 
 
 def _vapid_private_key() -> str:
-    """Normalize PEM from env (quoted / literal \\n / single-line PEM)."""
-    key = _unwrap_env_secret(settings.vapid_private_key or "")
+    """Normalize PEM from env (base64url: / quoted / literal \\n / single-line PEM)."""
+    key = _decode_prefixed_secret(settings.vapid_private_key or "")
     if "BEGIN" in key:
         key = _rewrap_pem(key)
     return key
@@ -146,8 +176,8 @@ def _validated_vapid_private_key() -> str:
         serialization.load_pem_private_key(key.encode(), password=None)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(
-            "VAPID_PRIVATE_KEY could not be parsed. Use a full PKCS#8 PEM and preserve newlines "
-            "(or a single line with \\n escapes)."
+            "VAPID_PRIVATE_KEY could not be parsed. For Sevalla/Cloud env vars prefer "
+            "`base64url:…` of private_key.pem (see scripts/print_vapid_env.py)."
         ) from exc
     return key
 

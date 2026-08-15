@@ -104,11 +104,27 @@ def test_vapid_private_key_rewrites_escaped_newlines(monkeypatch: pytest.MonkeyP
     serialization.load_pem_private_key(normalized.encode(), password=None)
 
 
-def test_vapid_private_key_rewrites_space_separated_pem(monkeypatch: pytest.MonkeyPatch) -> None:
-    spaced = " ".join(VALID_VAPID_PEM.split())
+def test_vapid_private_key_accepts_base64url(monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+    from pathlib import Path
+
+    pem = Path(__file__).resolve().parents[1] / "private_key.pem"
+    if not pem.exists():
+        pytest.skip("private_key.pem not present")
+    token = base64.urlsafe_b64encode(pem.read_bytes()).decode().rstrip("=")
     monkeypatch.setattr(
         "app.services.notifications.settings",
-        MagicMock(vapid_private_key=spaced),
+        MagicMock(vapid_private_key=f"base64url:{token}"),
+    )
+    normalized = _validated_vapid_private_key()
+    serialization.load_pem_private_key(normalized.encode(), password=None)
+
+
+def test_vapid_private_key_recovers_plus_turned_into_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    corrupted = VALID_VAPID_PEM.replace("+", " ")
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_private_key=corrupted),
     )
     normalized = _validated_vapid_private_key()
     serialization.load_pem_private_key(normalized.encode(), password=None)
