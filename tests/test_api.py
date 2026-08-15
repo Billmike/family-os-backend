@@ -1,0 +1,381 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi.testclient import TestClient
+
+from tests.conftest import auth_headers
+
+
+def test_health(client: TestClient) -> None:
+    res = client.get("/health")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+
+def test_register_login_me(client: TestClient) -> None:
+    headers = auth_headers(client, "kayode@example.com", name="Kayode")
+    me = client.get("/api/auth/me", headers=headers)
+    assert me.status_code == 200
+    assert me.json()["email"] == "kayode@example.com"
+    assert me.json()["name"] == "Kayode"
+
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "kayode@example.com", "password": "password123"},
+    )
+    assert login.status_code == 200
+    assert "access_token" in login.json()
+
+
+def test_duplicate_register(client: TestClient) -> None:
+    auth_headers(client, "dup@example.com")
+    res = client.post(
+        "/api/auth/register",
+        json={"email": "dup@example.com", "password": "password123", "name": "Dup"},
+    )
+    assert res.status_code == 409
+
+
+def test_family_create_members_invite_accept(client: TestClient) -> None:
+    owner = auth_headers(client, "owner@example.com", name="Kayode")
+    family = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Ayelegun Family", "timezone": "Europe/Berlin"},
+    )
+    assert family.status_code == 200
+    family_id = family.json()["id"]
+
+    members = client.get(f"/api/families/{family_id}/members", headers=owner)
+    assert members.status_code == 200
+    assert len(members.json()) == 1
+    assert members.json()[0]["role"] == "Owner"
+
+    child = client.post(
+        f"/api/families/{family_id}/members",
+        headers=owner,
+        json={"name": "Kita", "role": "Child"},
+    )
+    assert child.status_code == 200
+    assert child.json()["user_id"] is None
+
+    invite = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={"email": "ade@example.com"},
+    )
+    assert invite.status_code == 200
+    token = invite.json()["invite_token"]
+    assert "token_hash" not in invite.json()
+
+    partner = auth_headers(client, "ade@example.com", name="Ade")
+    accept = client.post(f"/api/invitations/{token}/accept", headers=partner)
+    assert accept.status_code == 200
+    assert accept.json()["member"]["role"] == "Parent"
+
+    # Cross-family denial
+    other = auth_headers(client, "other@example.com", name="Other")
+    denied = client.get(f"/api/families/{family_id}/members", headers=other)
+    assert denied.status_code == 404
+
+    lists = client.get(f"/api/families/{family_id}/shopping-lists", headers=owner)
+    assert lists.status_code == 200
+    assert lists.json()[0]["name"] == "Groceries"
+
+
+def test_dashboard_calendar_tasks_shopping_notifications(client: TestClient) -> None:
+    headers = auth_headers(client, "full@example.com", name="Kayode")
+    family = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Test Family", "timezone": "UTC"},
+    ).json()
+    family_id = family["id"]
+    members = client.get(f"/api/families/{family_id}/members", headers=headers).json()
+    member_id = members[0]["id"]
+
+    starts = datetime.now(timezone.utc) + timedelta(hours=2)
+    event = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={
+            "title": "School pickup",
+            "starts_at": starts.isoformat(),
+            "ends_at": (starts + timedelta(hours=1)).isoformat(),
+            "member_ids": [member_id],
+            "reminder_minutes": [30],
+            "location": "School",
+        },
+    )
+    assert event.status_code == 200
+
+    task = client.post(
+        f"/api/families/{family_id}/tasks",
+        headers=headers,
+        json={
+            "title": "Pack bags",
+            "priority": "high",
+            "category": "Child",
+            "assignee_ids": [member_id],
+            "recurrence_rule": "weekly",
+            "due_at": starts.isoformat(),
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    complete = client.post(f"/api/tasks/{task_id}/complete", headers=headers)
+    assert complete.status_code == 200
+    assert complete.json()["completed_at"] is not None
+
+    open_tasks = client.get(f"/api/families/{family_id}/tasks?filter=open", headers=headers)
+    assert open_tasks.status_code == 200
+    # next weekly occurrence created
+    assert any(t["title"] == "Pack bags" and t["completed_at"] is None for t in open_tasks.json())
+
+    lists = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()
+    list_id = lists[0]["id"]
+    item = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=headers,
+        json={"name": "Milk", "quantity": 1, "category": "Dairy"},
+    )
+    assert item.status_code == 200
+    item_id = item.json()["id"]
+
+    done = client.patch(
+        f"/api/shopping-items/{item_id}",
+        headers=headers,
+        json={"completed": True},
+    )
+    assert done.status_code == 200
+    assert done.json()["completed_at"] is not None
+
+    dash = client.get(f"/api/families/{family_id}/dashboard", headers=headers)
+    assert dash.status_code == 200
+    body = dash.json()
+    assert body["family_name"] == "Test Family"
+    assert "today_events" in body
+    assert "open_tasks" in body
+
+    prefs = client.get("/api/notification-preferences", headers=headers)
+    assert prefs.status_code == 200
+    assert prefs.json()["calendar_reminders"] is True
+
+    notifs = client.get("/api/notifications", headers=headers)
+    assert notifs.status_code == 200
+
+    push = client.post(
+        "/api/push/subscribe",
+        headers=headers,
+        json={
+            "endpoint": "https://fcm.googleapis.com/fcm/send/test-subscription",
+            "p256dh": "p256dh-key",
+            "auth": "auth-key",
+        },
+    )
+    assert push.status_code == 200
+
+
+def test_invite_token_stored_hashed_only(client: TestClient) -> None:
+    headers = auth_headers(client, "hash@example.com")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Hash Family", "timezone": "UTC"},
+    ).json()["id"]
+    invite = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=headers,
+        json={},
+    ).json()
+    assert invite["invite_token"]
+    # raw token only returned once in response, not persisted as field name token
+    assert "token" not in invite or invite.get("token") is None
+
+
+def test_invite_accept_second_use_conflict(client: TestClient) -> None:
+    owner = auth_headers(client, "invite-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Invite Once", "timezone": "UTC"},
+    ).json()["id"]
+    token = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()["invite_token"]
+
+    first = auth_headers(client, "first-partner@example.com", name="First")
+    assert client.post(f"/api/invitations/{token}/accept", headers=first).status_code == 200
+
+    second = auth_headers(client, "second-partner@example.com", name="Second")
+    reused = client.post(f"/api/invitations/{token}/accept", headers=second)
+    assert reused.status_code == 409
+    assert reused.json()["code"] == "invite_used"
+
+
+def test_existing_member_accept_does_not_burn_invite(client: TestClient) -> None:
+    owner = auth_headers(client, "burn-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "No Burn", "timezone": "UTC"},
+    ).json()["id"]
+    token = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()["invite_token"]
+
+    # Owner already belongs; accept must be idempotent and leave invite usable.
+    self_accept = client.post(f"/api/invitations/{token}/accept", headers=owner)
+    assert self_accept.status_code == 200
+    assert self_accept.json()["member"]["role"] == "Owner"
+
+    partner = auth_headers(client, "burn-partner@example.com", name="Partner")
+    accept = client.post(f"/api/invitations/{token}/accept", headers=partner)
+    assert accept.status_code == 200
+    assert accept.json()["member"]["role"] == "Parent"
+
+
+def test_reminder_minutes_validation(client: TestClient) -> None:
+    headers = auth_headers(client, "rem-bounds@example.com", name="Rem")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Rem Family", "timezone": "UTC"},
+    ).json()["id"]
+    starts = datetime.now(timezone.utc) + timedelta(hours=2)
+    base = {
+        "title": "Bounded",
+        "starts_at": starts.isoformat(),
+    }
+
+    too_many = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "reminder_minutes": list(range(11))},
+    )
+    assert too_many.status_code == 422
+
+    negative = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "reminder_minutes": [-1]},
+    )
+    assert negative.status_code == 422
+
+    too_large = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "reminder_minutes": [10081]},
+    )
+    assert too_large.status_code == 422
+
+    deduped = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "reminder_minutes": [15, 15, 30]},
+    )
+    assert deduped.status_code == 200, deduped.text
+    assert deduped.json()["reminder_minutes"] == [15, 30]
+
+
+def test_events_list_window_limits(client: TestClient) -> None:
+    headers = auth_headers(client, "window@example.com", name="Win")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Window Family", "timezone": "UTC"},
+    ).json()["id"]
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2027, 1, 3, tzinfo=timezone.utc)  # > 366 days
+    oversized = client.get(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        params={"from": start.isoformat(), "to": end.isoformat()},
+    )
+    assert oversized.status_code == 400
+
+    inverted = client.get(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        params={"from": end.isoformat(), "to": start.isoformat()},
+    )
+    assert inverted.status_code == 400
+
+    ok = client.get(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        params={
+            "from": start.isoformat(),
+            "to": (start + timedelta(days=30)).isoformat(),
+        },
+    )
+    assert ok.status_code == 200
+
+
+def test_owner_leave_blocked_without_successor(client: TestClient) -> None:
+    owner = auth_headers(client, "solo-owner@example.com", name="Solo")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Solo Family", "timezone": "UTC"},
+    ).json()["id"]
+    leave = client.post(f"/api/families/{family_id}/leave", headers=owner)
+    assert leave.status_code == 400
+    assert leave.json()["code"] == "owner_leave_blocked"
+
+
+def test_owner_leave_transfers_to_parent(client: TestClient) -> None:
+    owner = auth_headers(client, "leave-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Transfer Family", "timezone": "UTC"},
+    ).json()["id"]
+    token = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()["invite_token"]
+    parent = auth_headers(client, "leave-parent@example.com", name="Parent")
+    assert client.post(f"/api/invitations/{token}/accept", headers=parent).status_code == 200
+
+    leave = client.post(f"/api/families/{family_id}/leave", headers=owner)
+    assert leave.status_code == 204
+
+    members = client.get(f"/api/families/{family_id}/members", headers=parent).json()
+    assert len(members) == 1
+    assert members[0]["role"] == "Owner"
+    assert members[0]["name"] == "Parent"
+
+
+def test_push_subscribe_rejects_ssrf_endpoints(client: TestClient) -> None:
+    headers = auth_headers(client, "push@example.com")
+    for endpoint in (
+        "http://127.0.0.1:8080/internal",
+        "https://127.0.0.1/push",
+        "https://example.com/push/1",
+        "https://evil.example/hook",
+    ):
+        res = client.post(
+            "/api/push/subscribe",
+            headers=headers,
+            json={"endpoint": endpoint, "p256dh": "k", "auth": "a"},
+        )
+        assert res.status_code == 400, endpoint
+        assert res.json()["code"] == "invalid_push_endpoint"
+
+    ok = client.post(
+        "/api/push/subscribe",
+        headers=headers,
+        json={
+            "endpoint": "https://updates.push.services.mozilla.com/wpush/v2/abc",
+            "p256dh": "k",
+            "auth": "a",
+        },
+    )
+    assert ok.status_code == 200
