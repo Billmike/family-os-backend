@@ -113,7 +113,16 @@ def list_tasks(
     return q.order_by(Task.due_at.asc().nullslast(), Task.created_at.desc()).all()
 
 
-def update_task(db: Session, task: Task, data: TaskUpdate) -> Task:
+def update_task(
+    db: Session,
+    task: Task,
+    data: TaskUpdate,
+    actor: User | None = None,
+    background_tasks: BackgroundTasks | None = None,
+) -> Task:
+    previous_assignee_ids: set[UUID] | None = None
+    if data.assignee_ids is not None:
+        previous_assignee_ids = {a.family_member_id for a in task.assignees}
     if data.title is not None:
         task.title = data.title.strip()
     if data.description is not None:
@@ -141,6 +150,14 @@ def update_task(db: Session, task: Task, data: TaskUpdate) -> Task:
     db.commit()
     db.refresh(task)
     _broadcast_task(task, "task.updated")
+    if previous_assignee_ids is not None and actor is not None:
+        notification_service.notify_task_assigned(
+            db,
+            task,
+            actor_user_id=actor.id,
+            background_tasks=background_tasks,
+            previous_assignee_ids=previous_assignee_ids,
+        )
     return task
 
 

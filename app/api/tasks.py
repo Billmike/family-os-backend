@@ -41,12 +41,13 @@ def create_task(
 def patch_task(
     task_id: UUID,
     data: TaskUpdate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> TaskOut:
     task = task_service.get_family_task(db, task_id)
     get_membership(db, task.family_id, user.id)
-    task = task_service.update_task(db, task, data)
+    task = task_service.update_task(db, task, data, actor=user, background_tasks=background_tasks)
     return task_service.task_to_out(task)
 
 

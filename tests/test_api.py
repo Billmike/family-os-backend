@@ -491,3 +491,226 @@ def test_push_subscribe_rejects_ssrf_endpoints(client: TestClient) -> None:
         },
     )
     assert ok.status_code == 200
+
+
+def _two_member_family(client: TestClient, prefix: str) -> tuple[dict, dict, str, str, str]:
+    """Owner + partner family. Returns (owner_headers, partner_headers, family_id, owner_member_id, partner_member_id)."""
+    owner = auth_headers(client, f"{prefix}-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": f"{prefix} Family", "timezone": "UTC"},
+    ).json()["id"]
+    invite = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()
+    partner = auth_headers(client, f"{prefix}-partner@example.com", name="Partner")
+    accept = client.post(f"/api/invitations/{invite['invite_token']}/accept", headers=partner)
+    assert accept.status_code == 200
+    members = client.get(f"/api/families/{family_id}/members", headers=owner).json()
+    by_name = {m["name"]: m["id"] for m in members}
+    return owner, partner, family_id, by_name["Owner"], by_name["Partner"]
+
+
+def test_vapid_public_key_endpoint(client: TestClient, monkeypatch) -> None:
+    headers = auth_headers(client, "vapid@example.com")
+    empty = client.get("/api/push/vapid-public-key", headers=headers)
+    assert empty.status_code == 200
+    assert empty.json() == {"public_key": None}
+
+    monkeypatch.setattr(
+        "app.services.notifications.settings.vapid_public_key",
+        "BPublicKeyExample",
+    )
+    filled = client.get("/api/push/vapid-public-key", headers=headers)
+    assert filled.status_code == 200
+    assert filled.json() == {"public_key": "BPublicKeyExample"}
+
+
+def test_event_create_notifies_other_member_not_actor(client: TestClient) -> None:
+    owner, partner, family_id, _, _ = _two_member_family(client, "evt")
+    starts = datetime.now(timezone.utc) + timedelta(hours=2)
+    res = client.post(
+        f"/api/families/{family_id}/events",
+        headers=owner,
+        json={
+            "title": "Dentist",
+            "starts_at": starts.isoformat(),
+            "ends_at": (starts + timedelta(hours=1)).isoformat(),
+        },
+    )
+    assert res.status_code == 200
+
+    partner_notifs = client.get("/api/notifications", headers=partner).json()
+    calendar = [n for n in partner_notifs if n["type"] == "calendar" and n["title"] == "New event"]
+    assert len(calendar) == 1
+    assert calendar[0]["body"] == "Dentist"
+
+    owner_notifs = client.get("/api/notifications", headers=owner).json()
+    assert not any(n["title"] == "New event" for n in owner_notifs)
+
+
+def test_shopping_add_and_bought_notify_other_member(client: TestClient) -> None:
+    owner, partner, family_id, _, _ = _two_member_family(client, "shop")
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=owner).json()[0]["id"]
+
+    item = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=owner,
+        json={"name": "Milk", "quantity": 1},
+    )
+    assert item.status_code == 200
+    item_id = item.json()["id"]
+
+    partner_notifs = client.get("/api/notifications", headers=partner).json()
+    added = [n for n in partner_notifs if n["type"] == "shopping" and "added" in n["body"]]
+    assert len(added) == 1
+    assert "Milk" in added[0]["body"]
+
+    rename = client.patch(
+        f"/api/shopping-items/{item_id}",
+        headers=owner,
+        json={"name": "Oat milk"},
+    )
+    assert rename.status_code == 200
+    after_rename = client.get("/api/notifications", headers=partner).json()
+    assert len([n for n in after_rename if n["type"] == "shopping"]) == 1
+
+    bought = client.patch(
+        f"/api/shopping-items/{item_id}",
+        headers=owner,
+        json={"completed": True},
+    )
+    assert bought.status_code == 200
+    after_bought = client.get("/api/notifications", headers=partner).json()
+    bought_notifs = [n for n in after_bought if n["type"] == "shopping" and "bought" in n["body"]]
+    assert len(bought_notifs) == 1
+
+    owner_notifs = client.get("/api/notifications", headers=owner).json()
+    assert not any(n["type"] == "shopping" for n in owner_notifs)
+
+
+def test_task_reassign_notifies_newly_assigned_only(client: TestClient) -> None:
+    owner, partner, family_id, owner_mid, partner_mid = _two_member_family(client, "reassign")
+    third = auth_headers(client, "reassign-third@example.com", name="Third")
+    invite = client.post(f"/api/families/{family_id}/invitations", headers=owner, json={}).json()
+    client.post(f"/api/invitations/{invite['invite_token']}/accept", headers=third)
+    members = client.get(f"/api/families/{family_id}/members", headers=owner).json()
+    third_mid = next(m["id"] for m in members if m["name"] == "Third")
+
+    task = client.post(
+        f"/api/families/{family_id}/tasks",
+        headers=owner,
+        json={"title": "Pack bags", "assignee_ids": [partner_mid]},
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    partner_first = client.get("/api/notifications", headers=partner).json()
+    assert sum(1 for n in partner_first if n["title"] == "Task assigned") == 1
+
+    reassign = client.patch(
+        f"/api/tasks/{task_id}",
+        headers=owner,
+        json={"assignee_ids": [partner_mid, third_mid]},
+    )
+    assert reassign.status_code == 200
+
+    partner_after = client.get("/api/notifications", headers=partner).json()
+    assert sum(1 for n in partner_after if n["title"] == "Task assigned") == 1
+
+    third_notifs = client.get("/api/notifications", headers=third).json()
+    assigned = [n for n in third_notifs if n["title"] == "Task assigned"]
+    assert len(assigned) == 1
+    assert "Pack bags" in assigned[0]["body"]
+
+    # Re-assign only to owner (actor) — no new partner/third assignment notifs
+    client.patch(
+        f"/api/tasks/{task_id}",
+        headers=owner,
+        json={"assignee_ids": [owner_mid]},
+    )
+    partner_final = client.get("/api/notifications", headers=partner).json()
+    assert sum(1 for n in partner_final if n["title"] == "Task assigned") == 1
+
+
+def test_invite_accept_notifies_existing_members(client: TestClient) -> None:
+    owner = auth_headers(client, "join-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Join Family", "timezone": "UTC"},
+    ).json()["id"]
+    invite = client.post(f"/api/families/{family_id}/invitations", headers=owner, json={}).json()
+    token = invite["invite_token"]
+
+    joiner = auth_headers(client, "join-new@example.com", name="NewParent")
+    accept = client.post(f"/api/invitations/{token}/accept", headers=joiner)
+    assert accept.status_code == 200
+
+    owner_notifs = client.get("/api/notifications", headers=owner).json()
+    family = [n for n in owner_notifs if n["type"] == "family"]
+    assert len(family) == 1
+    assert "NewParent joined the family" in family[0]["body"]
+
+    joiner_notifs = client.get("/api/notifications", headers=joiner).json()
+    assert not any(n["type"] == "family" for n in joiner_notifs)
+
+    # Already-a-member accept is idempotent and must not notify again
+    again = client.post(f"/api/invitations/{token}/accept", headers=joiner)
+    assert again.status_code == 200
+    owner_again = client.get("/api/notifications", headers=owner).json()
+    assert sum(1 for n in owner_again if n["type"] == "family") == 1
+
+
+def test_preference_off_skips_notification_and_push(client: TestClient, monkeypatch) -> None:
+    owner, partner, family_id, _, _ = _two_member_family(client, "prefs")
+    client.patch(
+        "/api/notification-preferences",
+        headers=partner,
+        json={"calendar_reminders": False, "shopping_activity": False},
+    )
+
+    push_calls: list = []
+
+    def fake_webpush(**kwargs):
+        push_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "app.services.notifications.settings.vapid_private_key",
+        "priv",
+    )
+    monkeypatch.setattr(
+        "app.services.notifications.settings.vapid_public_key",
+        "pub",
+    )
+    monkeypatch.setattr("pywebpush.webpush", fake_webpush)
+
+    client.post(
+        "/api/push/subscribe",
+        headers=partner,
+        json={
+            "endpoint": "https://fcm.googleapis.com/fcm/send/test-pref",
+            "p256dh": "p",
+            "auth": "a",
+        },
+    )
+
+    starts = datetime.now(timezone.utc) + timedelta(hours=1)
+    client.post(
+        f"/api/families/{family_id}/events",
+        headers=owner,
+        json={"title": "Silent", "starts_at": starts.isoformat()},
+    )
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=owner).json()[0]["id"]
+    client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=owner,
+        json={"name": "Bread"},
+    )
+
+    partner_notifs = client.get("/api/notifications", headers=partner).json()
+    assert not any(n["type"] in ("calendar", "shopping") for n in partner_notifs)
+    assert push_calls == []

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -40,11 +40,12 @@ def list_events(
 def create_event(
     family_id: UUID,
     data: EventCreate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     _: FamilyMember = Depends(require_family_member),
     db: Session = Depends(get_db),
 ) -> EventOut:
-    event = event_service.create_event(db, family_id, user, data)
+    event = event_service.create_event(db, family_id, user, data, background_tasks=background_tasks)
     return event_service.event_to_out(event)
 
 

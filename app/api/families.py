@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -97,10 +97,13 @@ def post_invitation(
 @router.post("/api/invitations/{token}/accept", response_model=InvitationAcceptOut)
 def accept_invitation(
     token: str,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> InvitationAcceptOut:
-    family, member = family_service.accept_invitation(db, token, user)
+    family, member = family_service.accept_invitation(
+        db, token, user, background_tasks=background_tasks
+    )
     return InvitationAcceptOut(
         family=family_service.family_to_out(family),
         member=family_service.member_to_out(member),

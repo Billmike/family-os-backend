@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import bad_request, not_found
@@ -10,6 +11,7 @@ from app.models.family import FamilyMember
 from app.models.user import User
 from app.realtime.hub import hub
 from app.schemas.event import EventCreate, EventOut, EventUpdate
+from app.services import notifications as notification_service
 
 
 def _broadcast_event(event: Event, type_: str) -> None:
@@ -51,7 +53,13 @@ def _validate_members(db: Session, family_id: UUID, member_ids: list[UUID]) -> N
         raise bad_request("One or more members are not in this family")
 
 
-def create_event(db: Session, family_id: UUID, user: User, data: EventCreate) -> Event:
+def create_event(
+    db: Session,
+    family_id: UUID,
+    user: User,
+    data: EventCreate,
+    background_tasks: BackgroundTasks | None = None,
+) -> Event:
     _validate_members(db, family_id, data.member_ids)
     event = Event(
         family_id=family_id,
@@ -73,6 +81,18 @@ def create_event(db: Session, family_id: UUID, user: User, data: EventCreate) ->
     db.commit()
     db.refresh(event)
     _broadcast_event(event, "event.created")
+    notification_service.notify_family_members(
+        db,
+        family_id=family_id,
+        actor_user_id=user.id,
+        pref_field="calendar_reminders",
+        type="calendar",
+        title="New event",
+        body=event.title,
+        entity_type="event",
+        entity_id=event.id,
+        background_tasks=background_tasks,
+    )
     return event
 
 

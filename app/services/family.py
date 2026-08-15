@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+from fastapi import BackgroundTasks
 from sqlalchemy import text, update
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from app.models.family import Family, FamilyInvitation, FamilyMember
 from app.models.shopping import ShoppingList
 from app.models.user import User
 from app.realtime.hub import hub
+from app.services import notifications as notification_service
 from app.schemas.family import (
     FamilyCreate,
     FamilyOut,
@@ -167,7 +169,12 @@ def create_invitation(
     )
 
 
-def accept_invitation(db: Session, token: str, user: User) -> tuple[Family, FamilyMember]:
+def accept_invitation(
+    db: Session,
+    token: str,
+    user: User,
+    background_tasks: BackgroundTasks | None = None,
+) -> tuple[Family, FamilyMember]:
     token_hash = hash_invite_token(token)
     now = datetime.now(timezone.utc)
 
@@ -218,6 +225,18 @@ def accept_invitation(db: Session, token: str, user: User) -> tuple[Family, Fami
     db.commit()
     db.refresh(member)
     family = get_family(db, invitation.family_id)
+    notification_service.notify_family_members(
+        db,
+        family_id=family.id,
+        actor_user_id=user.id,
+        pref_field="family_activity",
+        type="family",
+        title="Family",
+        body=f"{user.name} joined the family",
+        entity_type="family",
+        entity_id=family.id,
+        background_tasks=background_tasks,
+    )
     return family, member
 
 

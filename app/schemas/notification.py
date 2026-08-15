@@ -68,3 +68,7 @@ class PushSubscriptionOut(ORMModel):
     user_agent: str | None
     created_at: datetime
     last_used_at: datetime | None
+
+
+class VapidPublicKeyOut(BaseModel):
+    public_key: str | None

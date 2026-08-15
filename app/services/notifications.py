@@ -88,6 +88,14 @@ def _send_push_in_background(user_id: UUID, payload: dict) -> None:
         db.close()
 
 
+_PUSH_URL_BY_TYPE = {
+    "calendar": "/?go=calendar",
+    "task": "/?go=tasks",
+    "shopping": "/?go=shopping",
+    "family": "/?go=notifications",
+}
+
+
 def create_notification(
     db: Session,
     *,
@@ -114,7 +122,17 @@ def create_notification(
     db.commit()
     db.refresh(notif)
     if push:
-        payload = {"title": title, "body": body, "type": type, "notification_id": str(notif.id)}
+        payload: dict = {
+            "title": title,
+            "body": body,
+            "type": type,
+            "notification_id": str(notif.id),
+            "url": _PUSH_URL_BY_TYPE.get(type, "/"),
+        }
+        if entity_type:
+            payload["entity_type"] = entity_type
+        if entity_id is not None:
+            payload["entity_id"] = str(entity_id)
         if background_tasks is not None:
             background_tasks.add_task(_send_push_in_background, user_id, payload)
         else:
@@ -122,13 +140,57 @@ def create_notification(
     return notif
 
 
+def notify_family_members(
+    db: Session,
+    *,
+    family_id: UUID,
+    actor_user_id: UUID,
+    pref_field: str,
+    type: str,
+    title: str,
+    body: str,
+    entity_type: str | None = None,
+    entity_id: UUID | None = None,
+    background_tasks: BackgroundTasks | None = None,
+) -> None:
+    members = (
+        db.query(FamilyMember)
+        .filter(
+            FamilyMember.family_id == family_id,
+            FamilyMember.user_id.isnot(None),
+            FamilyMember.user_id != actor_user_id,
+        )
+        .all()
+    )
+    for member in members:
+        assert member.user_id is not None
+        prefs = ensure_preferences(db, member.user_id)
+        if not getattr(prefs, pref_field):
+            continue
+        create_notification(
+            db,
+            family_id=family_id,
+            user_id=member.user_id,
+            type=type,
+            title=title,
+            body=body,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            background_tasks=background_tasks,
+        )
+
+
 def notify_task_assigned(
     db: Session,
     task: Task,
     actor_user_id: UUID,
     background_tasks: BackgroundTasks | None = None,
+    previous_assignee_ids: set[UUID] | None = None,
 ) -> None:
+    previous = previous_assignee_ids or set()
     for assignee in task.assignees:
+        if assignee.family_member_id in previous:
+            continue
         member = db.get(FamilyMember, assignee.family_member_id)
         if member is None or member.user_id is None or member.user_id == actor_user_id:
             continue
@@ -230,6 +292,11 @@ def unsubscribe_push(db: Session, user_id: UUID, subscription_id: UUID) -> None:
         raise not_found("Subscription not found")
     db.delete(sub)
     db.commit()
+
+
+def get_vapid_public_key() -> str | None:
+    key = settings.vapid_public_key.strip()
+    return key or None
 
 
 def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:

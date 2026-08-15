@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -54,12 +54,13 @@ def get_items(
 def create_item(
     list_id: UUID,
     data: ShoppingItemCreate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ShoppingItemOut:
     lst = shopping_service.get_list(db, list_id)
     get_membership(db, lst.family_id, user.id)
-    item = shopping_service.create_item(db, lst, user, data)
+    item = shopping_service.create_item(db, lst, user, data, background_tasks=background_tasks)
     return shopping_service.item_to_out(item)
 
 
@@ -67,12 +68,13 @@ def create_item(
 def patch_item(
     item_id: UUID,
     data: ShoppingItemUpdate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ShoppingItemOut:
     item = shopping_service.get_item(db, item_id)
     get_membership(db, item.shopping_list.family_id, user.id)
-    item = shopping_service.update_item(db, item, user, data)
+    item = shopping_service.update_item(db, item, user, data, background_tasks=background_tasks)
     return shopping_service.item_to_out(item)
 
 

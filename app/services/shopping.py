@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import not_found
@@ -8,6 +9,7 @@ from app.models.shopping import ShoppingItem, ShoppingList
 from app.models.user import User
 from app.realtime.hub import hub
 from app.schemas.shopping import ShoppingItemCreate, ShoppingItemOut, ShoppingItemUpdate, ShoppingListCreate, ShoppingListOut
+from app.services import notifications as notification_service
 
 
 def list_to_out(lst: ShoppingList) -> ShoppingListOut:
@@ -51,7 +53,13 @@ def list_items(db: Session, list_id: UUID) -> list[ShoppingItem]:
     )
 
 
-def create_item(db: Session, lst: ShoppingList, user: User, data: ShoppingItemCreate) -> ShoppingItem:
+def create_item(
+    db: Session,
+    lst: ShoppingList,
+    user: User,
+    data: ShoppingItemCreate,
+    background_tasks: BackgroundTasks | None = None,
+) -> ShoppingItem:
     item = ShoppingItem(
         shopping_list_id=lst.id,
         name=data.name.strip(),
@@ -67,6 +75,18 @@ def create_item(db: Session, lst: ShoppingList, user: User, data: ShoppingItemCr
         lst.family_id,
         {"type": "shopping.item.created", "item": item_to_out(item).model_dump(mode="json")},
     )
+    notification_service.notify_family_members(
+        db,
+        family_id=lst.family_id,
+        actor_user_id=user.id,
+        pref_field="shopping_activity",
+        type="shopping",
+        title="Shopping list",
+        body=f"{item.name} added",
+        entity_type="shopping_item",
+        entity_id=item.id,
+        background_tasks=background_tasks,
+    )
     return item
 
 
@@ -77,7 +97,13 @@ def get_item(db: Session, item_id: UUID) -> ShoppingItem:
     return item
 
 
-def update_item(db: Session, item: ShoppingItem, user: User, data: ShoppingItemUpdate) -> ShoppingItem:
+def update_item(
+    db: Session,
+    item: ShoppingItem,
+    user: User,
+    data: ShoppingItemUpdate,
+    background_tasks: BackgroundTasks | None = None,
+) -> ShoppingItem:
     if data.name is not None:
         item.name = data.name.strip()
     if data.quantity is not None:
@@ -87,11 +113,13 @@ def update_item(db: Session, item: ShoppingItem, user: User, data: ShoppingItemU
     if data.category is not None:
         item.category = data.category
     event_type = "shopping.item.updated"
+    marked_bought = False
     if data.completed is not None:
         if data.completed and item.completed_at is None:
             item.completed_at = datetime.now(timezone.utc)
             item.completed_by = user.id
             event_type = "shopping.item.completed"
+            marked_bought = True
         elif not data.completed:
             item.completed_at = None
             item.completed_by = None
@@ -103,6 +131,19 @@ def update_item(db: Session, item: ShoppingItem, user: User, data: ShoppingItemU
         family_id,
         {"type": event_type, "item": item_to_out(item).model_dump(mode="json")},
     )
+    if marked_bought:
+        notification_service.notify_family_members(
+            db,
+            family_id=family_id,
+            actor_user_id=user.id,
+            pref_field="shopping_activity",
+            type="shopping",
+            title="Shopping list",
+            body=f"{item.name} bought",
+            entity_type="shopping_item",
+            entity_id=item.id,
+            background_tasks=background_tasks,
+        )
     return item
 
 

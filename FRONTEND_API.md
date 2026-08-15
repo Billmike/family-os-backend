@@ -748,6 +748,20 @@ Auth required (current user’s notifications).
 
 ---
 
+### `GET /api/push/vapid-public-key`
+
+Auth required. Public VAPID key for `PushManager.subscribe`.
+
+**Response `200`**
+
+```json
+{ "public_key": "<url-safe base64>" }
+```
+
+`public_key` is `null` when Web Push is not configured on the server.
+
+---
+
 ### `POST /api/push/subscribe`
 
 **Request** (from the browser Push API subscription)
@@ -946,6 +960,7 @@ async function api<T>(
 | POST | `/api/notifications/read-all` | Yes |
 | GET | `/api/notification-preferences` | Yes |
 | PATCH | `/api/notification-preferences` | Yes |
+| GET | `/api/push/vapid-public-key` | Yes |
 | POST | `/api/push/subscribe` | Yes |
 | DELETE | `/api/push/subscribe/{id}` | Yes |
 | WS | `/api/ws/families/{family_id}?token=...` | Token query |

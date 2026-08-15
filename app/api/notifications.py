@@ -12,6 +12,7 @@ from app.schemas.notification import (
     NotificationPreferencesUpdate,
     PushSubscribeRequest,
     PushSubscriptionOut,
+    VapidPublicKeyOut,
 )
 from app.services import notifications as notification_service
 
@@ -64,6 +65,13 @@ def patch_prefs(
 ) -> NotificationPreferencesOut:
     prefs = notification_service.update_preferences(db, user.id, data)
     return notification_service.prefs_to_out(prefs)
+
+
+@router.get("/api/push/vapid-public-key", response_model=VapidPublicKeyOut)
+def vapid_public_key(
+    _: User = Depends(get_current_user),
+) -> VapidPublicKeyOut:
+    return VapidPublicKeyOut(public_key=notification_service.get_vapid_public_key())
 
 
 @router.post("/api/push/subscribe", response_model=PushSubscriptionOut)
