@@ -12,6 +12,7 @@ from app.core.exceptions import bad_request, conflict, forbidden, not_found
 from app.models.family import Family, FamilyInvitation, FamilyMember
 from app.models.shopping import ShoppingList
 from app.models.user import User
+from app.realtime.hub import hub
 from app.schemas.family import (
     FamilyCreate,
     FamilyOut,
@@ -263,6 +264,7 @@ def leave_family(db: Session, family_id: UUID, user: User) -> None:
 
     db.delete(member)
     db.commit()
+    hub.disconnect_user(family_id, user.id)
 
 
 def family_to_out(family: Family) -> FamilyOut:

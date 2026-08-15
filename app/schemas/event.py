@@ -8,6 +8,8 @@ from app.schemas.auth import ORMModel
 
 MAX_REMINDER_MINUTES = 10080  # 7 days
 MAX_REMINDERS_PER_EVENT = 10
+MAX_EVENT_DESCRIPTION = 5000
+MAX_EVENT_LOCATION = 200
 
 ReminderMinute = Annotated[int, Field(ge=0, le=MAX_REMINDER_MINUTES)]
 
@@ -24,8 +26,8 @@ def _dedupe_reminder_minutes(values: list[int]) -> list[int]:
 
 class EventCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    description: str | None = None
-    location: str | None = None
+    description: str | None = Field(default=None, max_length=MAX_EVENT_DESCRIPTION)
+    location: str | None = Field(default=None, max_length=MAX_EVENT_LOCATION)
     starts_at: datetime
     ends_at: datetime | None = None
     all_day: bool = False
@@ -43,8 +45,8 @@ class EventCreate(BaseModel):
 
 class EventUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = None
-    location: str | None = None
+    description: str | None = Field(default=None, max_length=MAX_EVENT_DESCRIPTION)
+    location: str | None = Field(default=None, max_length=MAX_EVENT_LOCATION)
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     all_day: bool | None = None

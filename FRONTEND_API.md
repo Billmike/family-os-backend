@@ -440,6 +440,9 @@ Auth + membership.
 
 | Field | Notes |
 |-------|--------|
+| `title` | Required; max **200** characters |
+| `description` | Optional; max **5000** characters (`422` if exceeded) |
+| `location` | Optional; max **200** characters (`422` if exceeded) |
 | `member_ids` | Family member UUIDs; empty = whole family |
 | `recurrence_rule` | e.g. `"daily"`, `"weekly"`, `"monthly"`, `"weekdays:mon,wed,fri"`, or iCal-like `FREQ=...` |
 | `reminder_minutes` | Minutes before start; each value `0`–`10080` (7 days); max **10** entries; duplicates are dropped. Examples: `5`, `15`, `30`, `60`, `1440` |
@@ -474,7 +477,7 @@ Also broadcasts WebSocket `event.created` on the family channel.
 
 Auth + membership in the event’s family.
 
-**Request** — any subset of create fields (`member_ids`, `reminder_minutes`, etc.).
+**Request** — any subset of create fields (`member_ids`, `reminder_minutes`, etc.). Same length limits as create (`description` max 5000, `location` max 200).
 
 **Response `200`** — `EventOut`. Also broadcasts WebSocket `event.updated`.
 

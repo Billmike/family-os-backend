@@ -204,3 +204,32 @@ def test_ws_task_broadcast_including_recurring_complete(client: TestClient) -> N
         gone = ws.receive_json()
         assert gone["type"] == "task.deleted"
         assert gone["task_id"] == next_msg["task"]["id"]
+
+
+def test_ws_leave_stops_broadcasts_and_blocks_reconnect(client: TestClient) -> None:
+    family_id, owner_headers, _owner_token, partner_headers, partner_token = _two_member_family(
+        client
+    )
+    list_id = client.get(
+        f"/api/families/{family_id}/shopping-lists", headers=owner_headers
+    ).json()[0]["id"]
+
+    with client.websocket_connect(_ws_url(family_id, partner_token)) as ws:
+        left = client.post(f"/api/families/{family_id}/leave", headers=partner_headers)
+        assert left.status_code == 204, left.text
+
+        created = client.post(
+            f"/api/shopping-lists/{list_id}/items",
+            headers=owner_headers,
+            json={"name": "SECRET_AFTER_LEAVE", "quantity": 1},
+        )
+        assert created.status_code == 200, created.text
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            ws.receive_json()
+        assert exc_info.value.code == 4403
+
+    with pytest.raises(WebSocketDisconnect) as reconnect_info:
+        with client.websocket_connect(_ws_url(family_id, partner_token)) as ws:
+            ws.receive_text()
+    assert reconnect_info.value.code == 4403

@@ -32,7 +32,7 @@ async def family_ws(
         await websocket.close(code=4403)
         return
 
-    await hub.connect(family_id, websocket)
+    await hub.connect(family_id, user_id, websocket)
     try:
         while True:
             # Keep-alive / ignore client messages
@@ -40,4 +40,4 @@ async def family_ws(
     except WebSocketDisconnect:
         pass
     finally:
-        await hub.disconnect(family_id, websocket)
+        await hub.disconnect(family_id, user_id, websocket)

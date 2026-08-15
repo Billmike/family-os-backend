@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+from app.schemas.event import MAX_EVENT_DESCRIPTION, MAX_EVENT_LOCATION
 from tests.conftest import auth_headers
 
 
@@ -335,6 +336,97 @@ def test_events_list_window_limits(client: TestClient) -> None:
         },
     )
     assert ok.status_code == 200
+
+
+def test_event_description_and_location_length_limits(client: TestClient) -> None:
+    headers = auth_headers(client, "event-len@example.com", name="Len")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Length Family", "timezone": "UTC"},
+    ).json()["id"]
+    starts = datetime.now(timezone.utc) + timedelta(hours=2)
+    base = {
+        "title": "Bounded fields",
+        "starts_at": starts.isoformat(),
+    }
+
+    too_long_description = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "description": "d" * (MAX_EVENT_DESCRIPTION + 1)},
+    )
+    assert too_long_description.status_code == 422
+
+    too_long_location = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={**base, "location": "l" * (MAX_EVENT_LOCATION + 1)},
+    )
+    assert too_long_location.status_code == 422
+
+    created = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={
+            **base,
+            "description": "d" * MAX_EVENT_DESCRIPTION,
+            "location": "l" * MAX_EVENT_LOCATION,
+        },
+    )
+    assert created.status_code == 200, created.text
+    event_id = created.json()["id"]
+    assert created.json()["description"] == "d" * MAX_EVENT_DESCRIPTION
+    assert created.json()["location"] == "l" * MAX_EVENT_LOCATION
+
+    patch_description = client.patch(
+        f"/api/events/{event_id}",
+        headers=headers,
+        json={"description": "d" * (MAX_EVENT_DESCRIPTION + 1)},
+    )
+    assert patch_description.status_code == 422
+
+    patch_location = client.patch(
+        f"/api/events/{event_id}",
+        headers=headers,
+        json={"location": "l" * (MAX_EVENT_LOCATION + 1)},
+    )
+    assert patch_location.status_code == 422
+
+
+def test_recurring_event_list_caps_instances(client: TestClient) -> None:
+    headers = auth_headers(client, "expand@example.com", name="Exp")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Expand Family", "timezone": "UTC"},
+    ).json()["id"]
+    starts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    created = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={
+            "title": "Daily standup",
+            "description": "d" * MAX_EVENT_DESCRIPTION,
+            "location": "l" * MAX_EVENT_LOCATION,
+            "starts_at": starts.isoformat(),
+            "recurrence_rule": "daily",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    listed = client.get(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        params={
+            "from": starts.isoformat(),
+            "to": (starts + timedelta(days=365)).isoformat(),
+        },
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) <= 200
+    assert all(row["title"] == "Daily standup" for row in rows)
 
 
 def test_owner_leave_blocked_without_successor(client: TestClient) -> None:
