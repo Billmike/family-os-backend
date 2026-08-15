@@ -7,7 +7,12 @@ import pytest
 
 from app.core.exceptions import AppError
 from app.core.config import Settings, validate_jwt_secret
-from app.services.notifications import PUSH_TIMEOUT_SECONDS, send_push_to_user, validate_push_endpoint
+from app.services.notifications import (
+    PUSH_TIMEOUT_SECONDS,
+    _vapid_sub_claim,
+    send_push_to_user,
+    validate_push_endpoint,
+)
 
 
 def test_validate_jwt_secret_rejects_known_placeholders() -> None:
@@ -49,6 +54,22 @@ def test_validate_push_endpoint_allowlist() -> None:
         validate_push_endpoint("https://127.0.0.1/push")
 
 
+def test_vapid_sub_claim_normalizes_bare_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_contact_email="user@example.com"),
+    )
+    assert _vapid_sub_claim() == "mailto:user@example.com"
+
+
+def test_vapid_sub_claim_keeps_mailto(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_contact_email="mailto:user@example.com"),
+    )
+    assert _vapid_sub_claim() == "mailto:user@example.com"
+
+
 def test_send_push_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.services.notifications.settings",
@@ -67,3 +88,26 @@ def test_send_push_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         send_push_to_user(db, uuid4(), {"title": "t"})
         webpush_mock.assert_called_once()
         assert webpush_mock.call_args.kwargs["timeout"] == PUSH_TIMEOUT_SECONDS
+        assert webpush_mock.call_args.kwargs["vapid_claims"] == {"sub": "mailto:t@t"}
+
+
+def test_send_push_removes_gone_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pywebpush import WebPushException
+
+    monkeypatch.setattr(
+        "app.services.notifications.settings",
+        MagicMock(vapid_private_key="priv", vapid_public_key="pub", vapid_contact_email="user@x.com"),
+    )
+    sub = MagicMock()
+    sub.id = uuid4()
+    sub.endpoint = "https://fcm.googleapis.com/fcm/send/abc"
+    sub.p256dh = "p"
+    sub.auth = "a"
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [sub]
+
+    response = MagicMock(status_code=410)
+    with patch("pywebpush.webpush", side_effect=WebPushException("gone", response=response)):
+        send_push_to_user(db, uuid4(), {"title": "t"})
+    db.delete.assert_called_once_with(sub)

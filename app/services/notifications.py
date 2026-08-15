@@ -14,6 +14,7 @@ from app.models.family import FamilyMember
 from app.models.notification import Notification, NotificationPreference, PushSubscription
 from app.models.task import Task
 from app.models.user import User, utcnow
+from app.realtime.hub import hub
 from app.schemas.notification import (
     NotificationOut,
     NotificationPreferencesOut,
@@ -96,6 +97,16 @@ _PUSH_URL_BY_TYPE = {
 }
 
 
+def _vapid_sub_claim() -> str:
+    """Web Push requires sub to be a mailto: or https: URI."""
+    contact = (settings.vapid_contact_email or "").strip()
+    if contact.startswith("mailto:") or contact.startswith("https:"):
+        return contact
+    if contact:
+        return f"mailto:{contact}"
+    return "mailto:admin@familyos.app"
+
+
 def create_notification(
     db: Session,
     *,
@@ -121,6 +132,14 @@ def create_notification(
     db.add(notif)
     db.commit()
     db.refresh(notif)
+    hub.send_to_user(
+        family_id,
+        user_id,
+        {
+            "type": "notification.created",
+            "notification": notification_to_out(notif).model_dump(mode="json"),
+        },
+    )
     if push:
         payload: dict = {
             "title": title,
@@ -301,15 +320,19 @@ def get_vapid_public_key() -> str | None:
 
 def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:
     if not settings.vapid_private_key or not settings.vapid_public_key:
-        logger.debug("VAPID keys not configured; skipping push")
+        logger.warning("VAPID keys not configured; skipping push")
         return
     try:
-        from pywebpush import webpush
+        from pywebpush import WebPushException, webpush
     except ImportError:
         logger.warning("pywebpush not available")
         return
 
     subs = db.query(PushSubscription).filter(PushSubscription.user_id == user_id).all()
+    if not subs:
+        logger.debug("No push subscriptions for user %s", user_id)
+        return
+    vapid_claims = {"sub": _vapid_sub_claim()}
     for sub in subs:
         try:
             validate_push_endpoint(sub.endpoint)
@@ -326,11 +349,19 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:
                 },
                 data=json.dumps(payload),
                 vapid_private_key=settings.vapid_private_key,
-                vapid_claims={"sub": settings.vapid_contact_email},
+                vapid_claims=vapid_claims,
                 timeout=PUSH_TIMEOUT_SECONDS,
             )
             sub.last_used_at = utcnow()
             db.commit()
+        except WebPushException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (404, 410):
+                logger.info("Removing expired push subscription %s (HTTP %s)", sub.id, status)
+                db.delete(sub)
+                db.commit()
+            else:
+                logger.info("Push failed for %s: %s", sub.id, exc)
         except Exception as exc:  # noqa: BLE001
             logger.info("Push failed for %s: %s", sub.id, exc)
 

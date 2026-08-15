@@ -864,6 +864,19 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 }
 ```
 
+**Notifications**
+
+Delivered only to the recipient’s WebSocket connection(s) for the family (not broadcast to every member).
+
+```json
+{
+  "type": "notification.created",
+  "notification": { }
+}
+```
+
+`notification` matches `NotificationOut` from `GET /api/notifications`. Use it to update the in-app bell unread count without refetching.
+
 Example client:
 
 ```ts
@@ -872,7 +885,7 @@ const ws = new WebSocket(
 );
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
-  // upsert/delete local events, tasks, and shopping from msg.type
+  // upsert/delete local events, tasks, shopping, and notifications from msg.type
 };
 ```
 
@@ -892,7 +905,7 @@ Use `ws://` locally and `wss://` in production.
    - Calendar → events + family WebSocket
    - Tasks → tasks (+ complete) + family WebSocket
    - Shopping → lists/items + family WebSocket
-   - Notifications → notifications + preferences
+   - Notifications → notifications + preferences + `notification.created` on family WebSocket
 5. On 401 → POST /api/auth/refresh → retry
 ```
 

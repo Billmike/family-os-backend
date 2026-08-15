@@ -81,6 +81,13 @@ class ConnectionHub:
             warning="No event loop for WebSocket broadcast",
         )
 
+    def send_to_user(self, family_id: UUID, user_id: UUID, message: dict) -> None:
+        """Deliver a message only to one user's sockets in a family room."""
+        self._run(
+            self._send_to_user(family_id, user_id, message),
+            warning="No event loop for WebSocket send_to_user",
+        )
+
     async def _broadcast(self, family_id: UUID, message: dict) -> None:
         payload = json.dumps(message, default=str)
         async with self._lock:
@@ -89,6 +96,22 @@ class ConnectionHub:
                 for uid, conns in self._rooms.get(family_id, {}).items()
                 for ws in conns
             ]
+        await self._deliver(family_id, payload, sockets)
+
+    async def _send_to_user(self, family_id: UUID, user_id: UUID, message: dict) -> None:
+        payload = json.dumps(message, default=str)
+        async with self._lock:
+            sockets: list[tuple[UUID, WebSocket]] = [
+                (user_id, ws) for ws in self._rooms.get(family_id, {}).get(user_id, set())
+            ]
+        await self._deliver(family_id, payload, sockets)
+
+    async def _deliver(
+        self,
+        family_id: UUID,
+        payload: str,
+        sockets: list[tuple[UUID, WebSocket]],
+    ) -> None:
         stale: list[tuple[UUID, WebSocket]] = []
         for uid, ws in sockets:
             try:
