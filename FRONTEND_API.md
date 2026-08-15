@@ -795,6 +795,20 @@ Auth required. Public VAPID key for `PushManager.subscribe`.
 
 ---
 
+### `POST /api/push/test`
+
+Auth required. Sends a test web push to every stored subscription for the current user.
+
+**Response `200`**
+
+```json
+{ "sent": 1 }
+```
+
+`sent` is the number of subscriptions that accepted the message. `0` usually means no subscription is stored — toggle push off/on on the device.
+
+---
+
 ## WebSocket (realtime family channel)
 
 ### `WS /api/ws/families/{family_id}?token=<access_token>`
@@ -976,4 +990,5 @@ async function api<T>(
 | GET | `/api/push/vapid-public-key` | Yes |
 | POST | `/api/push/subscribe` | Yes |
 | DELETE | `/api/push/subscribe/{id}` | Yes |
+| POST | `/api/push/test` | Yes |
 | WS | `/api/ws/families/{family_id}?token=...` | Token query |

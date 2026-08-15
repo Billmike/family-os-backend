@@ -63,7 +63,7 @@ uv run pytest -q
 2. Set a unique `JWT_SECRET` (≥32 chars; startup fails on placeholders). Set `CORS_ORIGINS` to your PWA origin(s).
 3. Set `PUBLIC_APP_URL` to the public web app origin (used in invitation links, e.g. `https://app.example.com`).
 4. `EMAIL_PROVIDER=log` (default) only logs invitation emails; plug in a real provider later.
-5. Generate VAPID keys for Web Push (`VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`, `VAPID_CONTACT_EMAIL`).
+5. Generate VAPID keys for Web Push (`VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`, `VAPID_CONTACT_EMAIL` as `mailto:…`). Push is sent **during** the request (not after), so it works on request-billed hosts without always-on CPU.
 6. Build the Docker image and deploy to Cloud Run (or similar).
 7. Run migrations on deploy: `alembic upgrade head` (Cloud Run job or startup command).
 8. Single instance is enough for MVP WebSocket fan-out; add Redis later if you scale horizontally.

@@ -91,3 +91,13 @@ def push_unsubscribe(
     db: Session = Depends(get_db),
 ) -> None:
     notification_service.unsubscribe_push(db, user.id, subscription_id)
+
+
+@router.post("/api/push/test")
+def push_test(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Send a test web push to the current user's subscriptions (for device setup checks)."""
+    sent = notification_service.send_test_push(db, user.id)
+    return {"sent": sent}

@@ -79,16 +79,6 @@ def ensure_preferences(db: Session, user_id: UUID) -> NotificationPreference:
     return prefs
 
 
-def _send_push_in_background(user_id: UUID, payload: dict) -> None:
-    from app.core.database import SessionLocal
-
-    db = SessionLocal()
-    try:
-        send_push_to_user(db, user_id, payload)
-    finally:
-        db.close()
-
-
 _PUSH_URL_BY_TYPE = {
     "calendar": "/?go=calendar",
     "task": "/?go=tasks",
@@ -105,6 +95,14 @@ def _vapid_sub_claim() -> str:
     if contact:
         return f"mailto:{contact}"
     return "mailto:admin@familyos.app"
+
+
+def _vapid_private_key() -> str:
+    """Normalize PEM from env (quoted / literal \\n common on PaaS secret stores)."""
+    key = (settings.vapid_private_key or "").strip().strip('"').strip("'")
+    if "\\n" in key and "\n" not in key:
+        key = key.replace("\\n", "\n")
+    return key
 
 
 def create_notification(
@@ -152,10 +150,10 @@ def create_notification(
             payload["entity_type"] = entity_type
         if entity_id is not None:
             payload["entity_id"] = str(entity_id)
-        if background_tasks is not None:
-            background_tasks.add_task(_send_push_in_background, user_id, payload)
-        else:
-            send_push_to_user(db, user_id, payload)
+        # Send in-request. FastAPI BackgroundTasks run after the response and are
+        # unreliable on request-billed hosts (CPU throttled once the response leaves).
+        _ = background_tasks
+        send_push_to_user(db, user_id, payload)
     return notif
 
 
@@ -318,21 +316,25 @@ def get_vapid_public_key() -> str | None:
     return key or None
 
 
-def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:
-    if not settings.vapid_private_key or not settings.vapid_public_key:
+def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> int:
+    """Deliver web push to all of the user's subscriptions. Returns successful send count."""
+    private_key = _vapid_private_key()
+    public_key = (settings.vapid_public_key or "").strip().strip('"').strip("'")
+    if not private_key or not public_key:
         logger.warning("VAPID keys not configured; skipping push")
-        return
+        return 0
     try:
         from pywebpush import WebPushException, webpush
     except ImportError:
         logger.warning("pywebpush not available")
-        return
+        return 0
 
     subs = db.query(PushSubscription).filter(PushSubscription.user_id == user_id).all()
     if not subs:
-        logger.debug("No push subscriptions for user %s", user_id)
-        return
+        logger.info("No push subscriptions for user %s", user_id)
+        return 0
     vapid_claims = {"sub": _vapid_sub_claim()}
+    sent = 0
     for sub in subs:
         try:
             validate_push_endpoint(sub.endpoint)
@@ -348,12 +350,13 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:
                     "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
                 },
                 data=json.dumps(payload),
-                vapid_private_key=settings.vapid_private_key,
+                vapid_private_key=private_key,
                 vapid_claims=vapid_claims,
                 timeout=PUSH_TIMEOUT_SECONDS,
             )
             sub.last_used_at = utcnow()
             db.commit()
+            sent += 1
         except WebPushException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status in (404, 410):
@@ -361,9 +364,25 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> None:
                 db.delete(sub)
                 db.commit()
             else:
-                logger.info("Push failed for %s: %s", sub.id, exc)
+                logger.warning("Push failed for %s: %s", sub.id, exc)
         except Exception as exc:  # noqa: BLE001
-            logger.info("Push failed for %s: %s", sub.id, exc)
+            logger.warning("Push failed for %s: %s", sub.id, exc)
+    if sent:
+        logger.info("Sent web push to %s/%s subscriptions for user %s", sent, len(subs), user_id)
+    return sent
+
+
+def send_test_push(db: Session, user_id: UUID) -> int:
+    return send_push_to_user(
+        db,
+        user_id,
+        {
+            "title": "FamilyOS",
+            "body": "Push notifications are working on this device.",
+            "type": "family",
+            "url": "/?go=notifications",
+        },
+    )
 
 
 def notification_to_out(n: Notification) -> NotificationOut:
