@@ -63,9 +63,9 @@ uv run pytest -q
 2. Set a unique `JWT_SECRET` (≥32 chars; startup fails on placeholders). Set `CORS_ORIGINS` to your PWA origin(s).
 3. Set `PUBLIC_APP_URL` to the public web app origin (used in invitation links, e.g. `https://app.example.com`).
 4. `EMAIL_PROVIDER=log` (default) only logs invitation emails; plug in a real provider later.
-5. Generate VAPID keys for Web Push. Keep `private_key.pem` locally and set env from it:
-   `python -m scripts.print_vapid_env` → copy `VAPID_PRIVATE_KEY=base64url:…` and matching `VAPID_PUBLIC_KEY`.
-   Use the `base64url:` form in Sevalla/Cloud — raw PEM often breaks when `+` becomes a space.
+5. Generate VAPID keys for Web Push. Keep `private_key.pem` locally and set env from:
+   `python -m scripts.print_vapid_env` → copy the short `VAPID_PRIVATE_KEY` (raw base64url) and matching `VAPID_PUBLIC_KEY`.
+   Do **not** paste PEM into Sevalla for `VAPID_PRIVATE_KEY` — pywebpush rejects PEM strings (ASN.1 error).
    `VAPID_CONTACT_EMAIL` must be `mailto:…`. Push is sent **during** the request (not after).
 6. Build the Docker image and deploy to Cloud Run (or similar).
 7. Run migrations on deploy: `alembic upgrade head` (Cloud Run job or startup command).

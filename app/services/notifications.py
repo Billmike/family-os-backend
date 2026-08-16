@@ -109,11 +109,7 @@ def _unwrap_env_secret(raw: str) -> str:
 
 
 def _decode_prefixed_secret(raw: str) -> str:
-    """Support base64url:/base64: wrappers that survive PaaS form encoding.
-
-    PEM contains ``+`` characters; many dashboards turn ``+`` into spaces and break ASN.1.
-    Prefer ``base64url:`` of the full PEM file for production env vars.
-    """
+    """Support base64url:/base64: wrappers that survive PaaS form encoding."""
     import base64
     import re
 
@@ -122,14 +118,11 @@ def _decode_prefixed_secret(raw: str) -> str:
         if not key.lower().startswith(prefix):
             continue
         payload = re.sub(r"\s+", "", key[len(prefix) :].strip())
-        if not urlsafe:
-            # std base64 may have had '+' turned into spaces before we stripped them;
-            # cannot recover here — prefer base64url: in production.
-            pad = "=" * ((4 - len(payload) % 4) % 4)
-            decoded = base64.b64decode(payload + pad)
-        else:
-            pad = "=" * ((4 - len(payload) % 4) % 4)
+        pad = "=" * ((4 - len(payload) % 4) % 4)
+        if urlsafe:
             decoded = base64.urlsafe_b64decode(payload + pad)
+        else:
+            decoded = base64.b64decode(payload + pad)
         return decoded.decode("utf-8")
     return key
 
@@ -147,7 +140,6 @@ def _rewrap_pem(pem: str) -> str:
         return pem
     label = match.group(1)
     body = match.group(2)
-    # Drop formatting newlines first, then treat remaining spaces as corrupted '+'.
     body = body.replace("\r\n", "\n").replace("\r", "\n")
     body = "".join(part.strip() for part in body.split("\n"))
     body = body.replace(" ", "+").replace("\t", "+")
@@ -157,29 +149,50 @@ def _rewrap_pem(pem: str) -> str:
     return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----\n"
 
 
-def _vapid_private_key() -> str:
-    """Normalize PEM from env (base64url: / quoted / literal \\n / single-line PEM)."""
+def _normalized_vapid_private_key_material() -> str:
+    """Return PEM text, raw 32-byte base64url, or base64url-decoded PEM text."""
     key = _decode_prefixed_secret(settings.vapid_private_key or "")
     if "BEGIN" in key:
-        key = _rewrap_pem(key)
-    return key
+        return _rewrap_pem(key)
+    # Compact raw VAPID private key (no PEM). Strip whitespace only.
+    import re
+
+    return re.sub(r"\s+", "", key)
 
 
-def _validated_vapid_private_key() -> str:
-    """Return a loadable VAPID private key PEM, or raise ValueError."""
-    key = _vapid_private_key()
-    if not key:
+def _vapid_signing_key():
+    """Build a py_vapid key object.
+
+    Important: ``pywebpush.webpush(vapid_private_key=<str>)`` calls
+    ``Vapid.from_string``, which does **not** accept PEM. PEM must go through
+    ``Vapid.from_pem`` (or pass a raw 32-byte base64url string).
+    """
+    from py_vapid import Vapid
+
+    material = _normalized_vapid_private_key_material()
+    if not material:
         raise ValueError("VAPID_PRIVATE_KEY is empty")
-    try:
-        from cryptography.hazmat.primitives import serialization
+    if "BEGIN" in material:
+        return Vapid.from_pem(material.encode())
+    return Vapid.from_string(private_key=material)
 
-        serialization.load_pem_private_key(key.encode(), password=None)
+
+def _validated_vapid_private_key():
+    """Return a loadable VAPID signing key, or raise ValueError."""
+    try:
+        return _vapid_signing_key()
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, ValueError) and str(exc).startswith("VAPID_PRIVATE_KEY"):
+            raise
         raise ValueError(
-            "VAPID_PRIVATE_KEY could not be parsed. For Sevalla/Cloud env vars prefer "
-            "`base64url:…` of private_key.pem (see scripts/print_vapid_env.py)."
+            "VAPID_PRIVATE_KEY could not be parsed. Prefer the raw key from "
+            "`python -m scripts.print_vapid_env` (short base64url, no PEM)."
         ) from exc
-    return key
+
+
+# Back-compat alias used by older tests / call sites
+def _vapid_private_key() -> str:
+    return _normalized_vapid_private_key_material()
 
 
 def create_notification(
@@ -400,7 +413,7 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
     """
     public_key = _unwrap_env_secret(settings.vapid_public_key or "")
     try:
-        private_key = _validated_vapid_private_key()
+        vapid_key = _validated_vapid_private_key()
     except ValueError as exc:
         logger.warning("%s", exc)
         return {"sent": 0, "subscriptions": 0, "error": str(exc)}
@@ -421,7 +434,8 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
             "subscriptions": 0,
             "error": "No push subscription stored for this account",
         }
-    vapid_claims = {"sub": _vapid_sub_claim()}
+    # Copy claims per send — pywebpush mutates the dict (aud/exp).
+    base_claims = {"sub": _vapid_sub_claim()}
     sent = 0
     last_error: str | None = None
     for sub in subs:
@@ -439,8 +453,8 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
                     "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
                 },
                 data=json.dumps(payload),
-                vapid_private_key=private_key,
-                vapid_claims=vapid_claims,
+                vapid_private_key=vapid_key,
+                vapid_claims=dict(base_claims),
                 timeout=PUSH_TIMEOUT_SECONDS,
             )
             sub.last_used_at = utcnow()
