@@ -69,7 +69,7 @@ uv run pytest -q
    `VAPID_CONTACT_EMAIL` must be `mailto:…`. Push is sent **during** the request (not after).
 6. Build the Docker image and deploy to Cloud Run (or similar).
 7. Run migrations on deploy: `alembic upgrade head` (Cloud Run job or startup command).
-8. Single instance is enough for MVP WebSocket fan-out; add Redis later if you scale horizontally.
+8. Pin Cloud Run (or equivalent) to **`--max-instances=1`** until Redis (or another shared revoke/fan-out bus) exists. In-memory WebSocket rooms cannot disconnect sockets on other instances after leave/kick. Single instance is enough for MVP WebSocket fan-out; add Redis later if you scale horizontally.
 
 ## Auth
 

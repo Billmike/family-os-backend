@@ -37,19 +37,23 @@ class ShoppingLocationOut(ORMModel):
     updated_at: datetime
 
 
+MAX_SHOPPING_UNIT = 64
+MAX_SHOPPING_CATEGORY = 64
+
+
 class ShoppingItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     quantity: Decimal | None = None
-    unit: str | None = None
-    category: str | None = None
+    unit: str | None = Field(default=None, max_length=MAX_SHOPPING_UNIT)
+    category: str | None = Field(default=None, max_length=MAX_SHOPPING_CATEGORY)
     location_id: UUID | None = None
 
 
 class ShoppingItemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     quantity: Decimal | None = None
-    unit: str | None = None
-    category: str | None = None
+    unit: str | None = Field(default=None, max_length=MAX_SHOPPING_UNIT)
+    category: str | None = Field(default=None, max_length=MAX_SHOPPING_CATEGORY)
     location_id: UUID | None = None
     completed: bool | None = None
 

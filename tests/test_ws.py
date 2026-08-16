@@ -44,6 +44,18 @@ def _ws_url(family_id: str, token: str) -> str:
     return f"/api/ws/families/{family_id}?token={token}"
 
 
+def _receive_until(ws, expected_type: str, *, limit: int = 10) -> dict:
+    """Skip interleaved notification.created frames until the domain event arrives."""
+    for _ in range(limit):
+        msg = ws.receive_json()
+        if msg["type"] == expected_type:
+            return msg
+        if msg["type"] == "notification.created":
+            continue
+        raise AssertionError(f"expected {expected_type}, got {msg['type']}")
+    raise AssertionError(f"did not receive {expected_type} within {limit} frames")
+
+
 def test_ws_bad_token_closes_4401(client: TestClient) -> None:
     family_id = str(uuid4())
     with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -84,8 +96,7 @@ def test_ws_shopping_item_broadcast_from_sync_route(client: TestClient) -> None:
         assert created.status_code == 200, created.text
         item_id = created.json()["id"]
 
-        msg = ws.receive_json()
-        assert msg["type"] == "shopping.item.created"
+        msg = _receive_until(ws, "shopping.item.created")
         assert msg["item"]["id"] == item_id
         assert msg["item"]["name"] == "Milk"
 
@@ -95,15 +106,13 @@ def test_ws_shopping_item_broadcast_from_sync_route(client: TestClient) -> None:
             json={"completed": True},
         )
         assert patched.status_code == 200, patched.text
-        done = ws.receive_json()
-        assert done["type"] == "shopping.item.completed"
+        done = _receive_until(ws, "shopping.item.completed")
         assert done["item"]["id"] == item_id
         assert done["item"]["completed_at"] is not None
 
         deleted = client.delete(f"/api/shopping-items/{item_id}", headers=owner_headers)
         assert deleted.status_code == 204, deleted.text
-        gone = ws.receive_json()
-        assert gone["type"] == "shopping.item.updated"
+        gone = _receive_until(ws, "shopping.item.updated")
         assert gone["deleted"] is True
         assert gone["item_id"] == item_id
 
@@ -128,8 +137,7 @@ def test_ws_event_broadcast(client: TestClient) -> None:
         assert created.status_code == 200, created.text
         event_id = created.json()["id"]
 
-        msg = ws.receive_json()
-        assert msg["type"] == "event.created"
+        msg = _receive_until(ws, "event.created")
         assert msg["event"]["id"] == event_id
         assert msg["event"]["title"] == "School pickup"
 
@@ -139,15 +147,13 @@ def test_ws_event_broadcast(client: TestClient) -> None:
             json={"title": "School drop-off"},
         )
         assert patched.status_code == 200, patched.text
-        updated = ws.receive_json()
-        assert updated["type"] == "event.updated"
+        updated = _receive_until(ws, "event.updated")
         assert updated["event"]["id"] == event_id
         assert updated["event"]["title"] == "School drop-off"
 
         deleted = client.delete(f"/api/events/{event_id}", headers=owner_headers)
         assert deleted.status_code == 204, deleted.text
-        gone = ws.receive_json()
-        assert gone["type"] == "event.deleted"
+        gone = _receive_until(ws, "event.deleted")
         assert gone["event_id"] == event_id
 
 
@@ -171,8 +177,7 @@ def test_ws_task_broadcast_including_recurring_complete(client: TestClient) -> N
         assert created.status_code == 200, created.text
         task_id = created.json()["id"]
 
-        msg = ws.receive_json()
-        assert msg["type"] == "task.created"
+        msg = _receive_until(ws, "task.created")
         assert msg["task"]["id"] == task_id
         assert msg["task"]["title"] == "Pack bags"
 
@@ -182,27 +187,23 @@ def test_ws_task_broadcast_including_recurring_complete(client: TestClient) -> N
             json={"title": "Pack sports bags"},
         )
         assert patched.status_code == 200, patched.text
-        updated = ws.receive_json()
-        assert updated["type"] == "task.updated"
+        updated = _receive_until(ws, "task.updated")
         assert updated["task"]["title"] == "Pack sports bags"
 
         complete = client.post(f"/api/tasks/{task_id}/complete", headers=owner_headers)
         assert complete.status_code == 200, complete.text
-        completed_msg = ws.receive_json()
-        assert completed_msg["type"] == "task.updated"
+        completed_msg = _receive_until(ws, "task.updated")
         assert completed_msg["task"]["id"] == task_id
         assert completed_msg["task"]["completed_at"] is not None
 
-        next_msg = ws.receive_json()
-        assert next_msg["type"] == "task.created"
+        next_msg = _receive_until(ws, "task.created")
         assert next_msg["task"]["id"] != task_id
         assert next_msg["task"]["title"] == "Pack sports bags"
         assert next_msg["task"]["completed_at"] is None
 
         deleted = client.delete(f"/api/tasks/{next_msg['task']['id']}", headers=owner_headers)
         assert deleted.status_code == 204, deleted.text
-        gone = ws.receive_json()
-        assert gone["type"] == "task.deleted"
+        gone = _receive_until(ws, "task.deleted")
         assert gone["task_id"] == next_msg["task"]["id"]
 
 

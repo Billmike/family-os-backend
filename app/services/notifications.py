@@ -1,6 +1,7 @@
 import ipaddress
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID
@@ -26,7 +27,10 @@ from app.schemas.notification import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-PUSH_TIMEOUT_SECONDS = 5
+PUSH_TIMEOUT_SECONDS = 3
+PUSH_BUDGET_SECONDS = 3
+MAX_PUSH_SUBSCRIPTIONS_PER_USER = 10
+MAX_PUSH_FAILURES = 3
 
 # Known Web Push service hostnames / suffixes (SSRF allowlist).
 _ALLOWED_PUSH_HOSTS = frozenset(
@@ -67,6 +71,43 @@ def validate_push_endpoint(url: str) -> None:
     if any(host.endswith(suffix) for suffix in _ALLOWED_PUSH_HOST_SUFFIXES):
         return
     raise bad_request("Push endpoint host is not allowed", "invalid_push_endpoint")
+
+
+def _parse_quiet_hhmm(value: str) -> int | None:
+    """Parse ``HH:MM`` into minutes since midnight, or None if invalid."""
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def is_in_quiet_hours(
+    prefs: NotificationPreference,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when ``now`` (UTC) falls inside configured quiet hours.
+
+    Supports overnight windows (e.g. 22:00–07:00). Both start and end must be
+    valid ``HH:MM`` strings; otherwise quiet hours are treated as unset.
+    """
+    if not prefs.quiet_hours_start or not prefs.quiet_hours_end:
+        return False
+    start = _parse_quiet_hhmm(prefs.quiet_hours_start)
+    end = _parse_quiet_hhmm(prefs.quiet_hours_end)
+    if start is None or end is None or start == end:
+        return False
+    current = now or datetime.now(timezone.utc)
+    minutes = current.hour * 60 + current.minute
+    if start < end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
 
 
 def ensure_preferences(db: Session, user_id: UUID) -> NotificationPreference:
@@ -243,7 +284,11 @@ def create_notification(
         # Send in-request. FastAPI BackgroundTasks run after the response and are
         # unreliable on request-billed hosts (CPU throttled once the response leaves).
         _ = background_tasks
-        send_push_to_user(db, user_id, payload)
+        prefs = ensure_preferences(db, user_id)
+        if is_in_quiet_hours(prefs):
+            logger.info("Skipping push for user %s during quiet hours", user_id)
+        else:
+            send_push_to_user(db, user_id, payload)
     return notif
 
 
@@ -376,15 +421,35 @@ def subscribe_push(db: Session, user: User, data: PushSubscribeRequest) -> PushS
         existing.auth = data.auth
         existing.user_agent = data.user_agent
         existing.last_used_at = utcnow()
+        existing.failure_count = 0
         db.commit()
         db.refresh(existing)
         return existing
+
+    count = (
+        db.query(PushSubscription)
+        .filter(PushSubscription.user_id == user.id)
+        .count()
+    )
+    if count >= MAX_PUSH_SUBSCRIPTIONS_PER_USER:
+        overflow = count - MAX_PUSH_SUBSCRIPTIONS_PER_USER + 1
+        oldest = (
+            db.query(PushSubscription)
+            .filter(PushSubscription.user_id == user.id)
+            .order_by(PushSubscription.created_at.asc())
+            .limit(overflow)
+            .all()
+        )
+        for old in oldest:
+            db.delete(old)
+
     sub = PushSubscription(
         user_id=user.id,
         endpoint=data.endpoint,
         p256dh=data.p256dh,
         auth=data.auth,
         user_agent=data.user_agent,
+        failure_count=0,
         last_used_at=utcnow(),
     )
     db.add(sub)
@@ -438,7 +503,16 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
     base_claims = {"sub": _vapid_sub_claim()}
     sent = 0
     last_error: str | None = None
+    started = time.monotonic()
     for sub in subs:
+        if time.monotonic() - started >= PUSH_BUDGET_SECONDS:
+            logger.info(
+                "Push budget exhausted for user %s after %s sent of %s",
+                user_id,
+                sent,
+                len(subs),
+            )
+            break
         try:
             validate_push_endpoint(sub.endpoint)
         except AppError:
@@ -458,6 +532,7 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
                 timeout=PUSH_TIMEOUT_SECONDS,
             )
             sub.last_used_at = utcnow()
+            sub.failure_count = 0
             db.commit()
             sent += 1
         except WebPushException as exc:
@@ -466,12 +541,15 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
                 logger.info("Removing expired push subscription %s (HTTP %s)", sub.id, status)
                 db.delete(sub)
                 db.commit()
+            elif status is not None and 400 <= status < 500:
+                last_error = str(exc)
+                _record_push_failure(db, sub, last_error)
             else:
                 last_error = str(exc)
                 logger.warning("Push failed for %s: %s", sub.id, exc)
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
-            logger.warning("Push failed for %s: %s", sub.id, exc)
+            _record_push_failure(db, sub, last_error)
     if sent:
         logger.info("Sent web push to %s/%s subscriptions for user %s", sent, len(subs), user_id)
         return {"sent": sent, "subscriptions": len(subs), "error": None}
@@ -480,6 +558,27 @@ def send_push_to_user(db: Session, user_id: UUID, payload: dict) -> dict:
         "subscriptions": len(subs),
         "error": last_error or "Push delivery failed for all subscriptions",
     }
+
+
+def _record_push_failure(db: Session, sub: PushSubscription, error: str) -> None:
+    sub.failure_count = int(sub.failure_count or 0) + 1
+    if sub.failure_count >= MAX_PUSH_FAILURES:
+        logger.info(
+            "Removing sticky push subscription %s after %s failures: %s",
+            sub.id,
+            sub.failure_count,
+            error,
+        )
+        db.delete(sub)
+    else:
+        logger.warning(
+            "Push failed for %s (%s/%s): %s",
+            sub.id,
+            sub.failure_count,
+            MAX_PUSH_FAILURES,
+            error,
+        )
+    db.commit()
 
 
 def send_test_push(db: Session, user_id: UUID) -> dict:

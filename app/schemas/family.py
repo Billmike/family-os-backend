@@ -43,7 +43,6 @@ class MemberOut(ORMModel):
 
 class InvitationCreate(BaseModel):
     email: EmailStr | None = None
-    role: str = Field(default="Parent")
 
 
 class InvitationOut(BaseModel):

@@ -734,6 +734,7 @@ def _two_member_family(client: TestClient, prefix: str) -> tuple[dict, dict, str
 
 def test_vapid_public_key_endpoint(client: TestClient, monkeypatch) -> None:
     headers = auth_headers(client, "vapid@example.com")
+    monkeypatch.setattr("app.services.notifications.settings.vapid_public_key", "")
     empty = client.get("/api/push/vapid-public-key", headers=headers)
     assert empty.status_code == 200
     assert empty.json() == {"public_key": None}

@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 
 from app.schemas.auth import ORMModel
 
+MAX_TASK_DESCRIPTION = 2000
+
 
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=MAX_TASK_DESCRIPTION)
     due_at: datetime | None = None
     priority: str = Field(default="normal")
     category: str | None = None
@@ -18,7 +20,7 @@ class TaskCreate(BaseModel):
 
 class TaskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=MAX_TASK_DESCRIPTION)
     due_at: datetime | None = None
     priority: str | None = None
     category: str | None = None

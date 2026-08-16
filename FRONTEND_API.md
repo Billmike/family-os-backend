@@ -342,12 +342,11 @@ Auth + membership. Owner/Parent only.
 
 ```json
 {
-  "email": "ade@example.com",
-  "role": "Parent"
+  "email": "ade@example.com"
 }
 ```
 
-Both fields optional; `role` defaults to `"Parent"`.
+`email` is optional. Accepted members always join as **Parent** (partner invites). Add children via `POST /api/families/{family_id}/members` instead.
 
 **Response `200`**
 
@@ -823,6 +822,8 @@ Auth required (current user’s notifications).
 ### `PATCH /api/notification-preferences`
 
 **Request** — any subset of the preference booleans / quiet hours strings.
+
+Quiet hours use `HH:MM` (24h, UTC). When both `quiet_hours_start` and `quiet_hours_end` are set, Web Push is skipped during that window; in-app notifications and WebSocket `notification.created` still fire. Overnight windows (e.g. `22:00`–`07:00`) are supported.
 
 **Response `200`** — full preferences object.
 
