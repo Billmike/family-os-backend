@@ -19,11 +19,30 @@ class ShoppingListOut(ORMModel):
     updated_at: datetime
 
 
+class ShoppingLocationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ShoppingLocationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    sort_order: int | None = None
+
+
+class ShoppingLocationOut(ORMModel):
+    id: UUID
+    family_id: UUID
+    name: str
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class ShoppingItemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     quantity: Decimal | None = None
     unit: str | None = None
     category: str | None = None
+    location_id: UUID | None = None
 
 
 class ShoppingItemUpdate(BaseModel):
@@ -31,6 +50,7 @@ class ShoppingItemUpdate(BaseModel):
     quantity: Decimal | None = None
     unit: str | None = None
     category: str | None = None
+    location_id: UUID | None = None
     completed: bool | None = None
 
 
@@ -41,6 +61,7 @@ class ShoppingItemOut(ORMModel):
     quantity: Decimal | None
     unit: str | None
     category: str | None
+    location_id: UUID | None
     completed_at: datetime | None
     created_by: UUID
     completed_by: UUID | None

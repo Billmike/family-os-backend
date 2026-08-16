@@ -18,6 +18,9 @@ class Family(Base, TimestampMixin):
     members = relationship("FamilyMember", back_populates="family", cascade="all, delete-orphan")
     invitations = relationship("FamilyInvitation", back_populates="family", cascade="all, delete-orphan")
     shopping_lists = relationship("ShoppingList", back_populates="family", cascade="all, delete-orphan")
+    shopping_locations = relationship(
+        "ShoppingLocation", back_populates="family", cascade="all, delete-orphan"
+    )
 
 
 class FamilyMember(Base, TimestampMixin):

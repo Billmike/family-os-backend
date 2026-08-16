@@ -84,6 +84,85 @@ def test_family_create_members_invite_accept(client: TestClient) -> None:
     assert lists.status_code == 200
     assert lists.json()[0]["name"] == "Groceries"
 
+    locations = client.get(f"/api/families/{family_id}/shopping-locations", headers=owner)
+    assert locations.status_code == 200
+    assert [loc["name"] for loc in locations.json()] == [
+        "REWE",
+        "LIDL",
+        "ALDI",
+        "Rossmann",
+        "DM",
+        "African store",
+    ]
+
+
+def test_shopping_locations_crud_and_item_assignment(client: TestClient) -> None:
+    owner = auth_headers(client, "locs-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Loc Family", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=owner).json()[0]["id"]
+
+    created = client.post(
+        f"/api/families/{family_id}/shopping-locations",
+        headers=owner,
+        json={"name": "JC Penney"},
+    )
+    assert created.status_code == 200
+    loc_id = created.json()["id"]
+    assert created.json()["name"] == "JC Penney"
+
+    dup = client.post(
+        f"/api/families/{family_id}/shopping-locations",
+        headers=owner,
+        json={"name": "JC Penney"},
+    )
+    assert dup.status_code == 409
+
+    item = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=owner,
+        json={"name": "Socks", "category": "Other", "location_id": loc_id},
+    )
+    assert item.status_code == 200
+    assert item.json()["location_id"] == loc_id
+    item_id = item.json()["id"]
+
+    other = auth_headers(client, "locs-other@example.com", name="Other")
+    other_family_id = client.post(
+        "/api/families",
+        headers=other,
+        json={"name": "Other Family", "timezone": "UTC"},
+    ).json()["id"]
+    other_loc_id = client.get(
+        f"/api/families/{other_family_id}/shopping-locations", headers=other
+    ).json()[0]["id"]
+
+    cross = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=owner,
+        json={"name": "Bad", "location_id": other_loc_id},
+    )
+    assert cross.status_code == 400
+
+    renamed = client.patch(
+        f"/api/shopping-locations/{loc_id}",
+        headers=owner,
+        json={"name": "JCPenney"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "JCPenney"
+
+    deleted = client.delete(f"/api/shopping-locations/{loc_id}", headers=owner)
+    assert deleted.status_code == 204
+
+    items = client.get(f"/api/shopping-lists/{list_id}/items", headers=owner)
+    assert items.status_code == 200
+    cleared = next(i for i in items.json() if i["id"] == item_id)
+    assert cleared["location_id"] is None
+
 
 def test_dashboard_calendar_tasks_shopping_notifications(client: TestClient) -> None:
     headers = auth_headers(client, "full@example.com", name="Kayode")
@@ -336,6 +415,36 @@ def test_events_list_window_limits(client: TestClient) -> None:
         },
     )
     assert ok.status_code == 200
+
+
+def test_far_future_events_in_defaults_and_dashboard(client: TestClient) -> None:
+    headers = auth_headers(client, "far-future@example.com", name="Far")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Far Family", "timezone": "UTC"},
+    ).json()["id"]
+
+    starts = datetime.now(timezone.utc) + timedelta(days=90)
+    created = client.post(
+        f"/api/families/{family_id}/events",
+        headers=headers,
+        json={
+            "title": "September trip",
+            "starts_at": starts.isoformat(),
+            "ends_at": (starts + timedelta(hours=2)).isoformat(),
+        },
+    )
+    assert created.status_code == 200
+    event_id = created.json()["id"]
+
+    listed = client.get(f"/api/families/{family_id}/events", headers=headers)
+    assert listed.status_code == 200
+    assert any(e["id"] == event_id for e in listed.json())
+
+    dash = client.get(f"/api/families/{family_id}/dashboard", headers=headers)
+    assert dash.status_code == 200
+    assert any(e["id"] == event_id for e in dash.json()["upcoming_events"])
 
 
 def test_event_description_and_location_length_limits(client: TestClient) -> None:

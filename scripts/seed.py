@@ -7,7 +7,7 @@ from app.core.security import hash_password
 from app.models.event import Event, EventMember, EventReminder
 from app.models.family import Family, FamilyMember
 from app.models.notification import Notification, NotificationPreference
-from app.models.shopping import ShoppingItem, ShoppingList
+from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation, DEFAULT_SHOPPING_LOCATIONS
 from app.models.task import Task, TaskAssignee
 from app.models.user import User
 
@@ -52,7 +52,14 @@ def seed() -> None:
 
         groceries = ShoppingList(family_id=family.id, name="Groceries")
         db.add(groceries)
+        for i, name in enumerate(DEFAULT_SHOPPING_LOCATIONS):
+            db.add(ShoppingLocation(family_id=family.id, name=name, sort_order=i))
         db.flush()
+
+        locations = {
+            loc.name: loc
+            for loc in db.query(ShoppingLocation).filter(ShoppingLocation.family_id == family.id).all()
+        }
 
         now = datetime.now(timezone.utc)
         today = now.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -89,6 +96,7 @@ def seed() -> None:
                 quantity=2,
                 unit="L",
                 category="Dairy",
+                location_id=locations["REWE"].id,
                 created_by=ade.id,
             )
         )
@@ -99,6 +107,7 @@ def seed() -> None:
                 quantity=1,
                 unit="bunch",
                 category="Produce",
+                location_id=locations["LIDL"].id,
                 created_by=kayode.id,
             )
         )

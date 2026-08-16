@@ -3,7 +3,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.core.timeutil import day_bounds, family_now
+from app.core.timeutil import day_bounds, ensure_aware, family_now
 from app.models.family import Family, FamilyMember
 from app.models.shopping import ShoppingItem, ShoppingList
 from app.models.task import Task
@@ -16,12 +16,12 @@ from app.services.tasks import task_to_out
 def get_dashboard(db: Session, family: Family, member: FamilyMember) -> DashboardOut:
     start, end = day_bounds(family.timezone)
     today_events = list_events(db, family.id, start, end)
-    upcoming_end = end + timedelta(days=14)
+    upcoming_end = end + timedelta(days=365)
     upcoming = [
         e
         for e in list_events(db, family.id, end, upcoming_end)
-        if (e.occurrence_starts_at or e.starts_at) >= end
-    ][:10]
+        if ensure_aware(e.occurrence_starts_at or e.starts_at) >= end
+    ]
 
     open_tasks = (
         db.query(Task)

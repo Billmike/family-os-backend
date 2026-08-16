@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.deps import FamilyRole
 from app.core.exceptions import bad_request, conflict, forbidden, not_found
 from app.models.family import Family, FamilyInvitation, FamilyMember
-from app.models.shopping import ShoppingList
+from app.models.shopping import ShoppingList, ShoppingLocation, DEFAULT_SHOPPING_LOCATIONS
 from app.models.user import User
 from app.realtime.hub import hub
 from app.services import notifications as notification_service
@@ -30,6 +30,11 @@ settings = get_settings()
 
 VALID_ROLES = {FamilyRole.OWNER, FamilyRole.PARENT, FamilyRole.CHILD}
 LINKED_ADULT_ROLES = (FamilyRole.OWNER, FamilyRole.PARENT)
+
+
+def seed_default_shopping_locations(db: Session, family_id: UUID) -> None:
+    for i, name in enumerate(DEFAULT_SHOPPING_LOCATIONS):
+        db.add(ShoppingLocation(family_id=family_id, name=name, sort_order=i))
 
 
 def _advisory_lock_family(db: Session, family_id: UUID) -> None:
@@ -68,6 +73,7 @@ def create_family(db: Session, user: User, data: FamilyCreate) -> Family:
     db.add(owner)
     groceries = ShoppingList(family_id=family.id, name="Groceries")
     db.add(groceries)
+    seed_default_shopping_locations(db, family.id)
     db.commit()
     db.refresh(family)
     return family

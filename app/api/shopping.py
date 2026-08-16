@@ -13,6 +13,9 @@ from app.schemas.shopping import (
     ShoppingItemUpdate,
     ShoppingListCreate,
     ShoppingListOut,
+    ShoppingLocationCreate,
+    ShoppingLocationOut,
+    ShoppingLocationUpdate,
 )
 from app.services import shopping as shopping_service
 
@@ -37,6 +40,53 @@ def create_list(
 ) -> ShoppingListOut:
     lst = shopping_service.create_shopping_list(db, family_id, data)
     return shopping_service.list_to_out(lst)
+
+
+@router.get("/api/families/{family_id}/shopping-locations", response_model=list[ShoppingLocationOut])
+def get_locations(
+    family_id: UUID,
+    _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> list[ShoppingLocationOut]:
+    return [
+        shopping_service.location_to_out(loc)
+        for loc in shopping_service.list_locations(db, family_id)
+    ]
+
+
+@router.post("/api/families/{family_id}/shopping-locations", response_model=ShoppingLocationOut)
+def create_location(
+    family_id: UUID,
+    data: ShoppingLocationCreate,
+    _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> ShoppingLocationOut:
+    loc = shopping_service.create_location(db, family_id, data)
+    return shopping_service.location_to_out(loc)
+
+
+@router.patch("/api/shopping-locations/{location_id}", response_model=ShoppingLocationOut)
+def patch_location(
+    location_id: UUID,
+    data: ShoppingLocationUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ShoppingLocationOut:
+    loc = shopping_service.get_location(db, location_id)
+    get_membership(db, loc.family_id, user.id)
+    loc = shopping_service.update_location(db, loc, data)
+    return shopping_service.location_to_out(loc)
+
+
+@router.delete("/api/shopping-locations/{location_id}", status_code=204)
+def delete_location(
+    location_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    loc = shopping_service.get_location(db, location_id)
+    get_membership(db, loc.family_id, user.id)
+    shopping_service.delete_location(db, loc)
 
 
 @router.get("/api/shopping-lists/{list_id}/items", response_model=list[ShoppingItemOut])

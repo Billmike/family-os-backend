@@ -28,7 +28,7 @@ def list_events(
 ) -> list[EventOut]:
     now = datetime.now(timezone.utc)
     window_start = ensure_aware(from_ or now - timedelta(days=1))
-    window_end = ensure_aware(to or now + timedelta(days=14))
+    window_end = ensure_aware(to or now + timedelta(days=365))
     if window_end <= window_start:
         raise bad_request("`to` must be after `from`")
     if window_end - window_start > MAX_EVENT_WINDOW:

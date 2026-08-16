@@ -189,7 +189,7 @@ Auth required.
 
 ### `POST /api/families`
 
-Auth required. Creates family, adds caller as `Owner`, creates default shopping list **Groceries**.
+Auth required. Creates family, adds caller as `Owner`, creates default shopping list **Groceries**, and seeds default shopping locations (REWE, LIDL, ALDI, Rossmann, DM, African store).
 
 **Request**
 
@@ -408,7 +408,7 @@ Auth + membership.
 | Param | Type | Default |
 |-------|------|---------|
 | `from` | ISO datetime | ~1 day ago |
-| `to` | ISO datetime | ~14 days ahead |
+| `to` | ISO datetime | ~365 days ahead |
 
 `to` must be after `from`. Maximum window span is **366 days** (`400` if exceeded).
 
@@ -609,6 +609,55 @@ No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** 
 
 ---
 
+### `GET /api/families/{family_id}/shopping-locations`
+
+**Response `200`** — `ShoppingLocationOut[]` ordered by `sort_order`, then name:
+
+```json
+[
+  {
+    "id": "...",
+    "family_id": "...",
+    "name": "REWE",
+    "sort_order": 0,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+]
+```
+
+---
+
+### `POST /api/families/{family_id}/shopping-locations`
+
+**Request**
+
+```json
+{ "name": "JC Penney" }
+```
+
+**Response `200`** — `ShoppingLocationOut`. Duplicate names in the same family return `409`.
+
+---
+
+### `PATCH /api/shopping-locations/{location_id}`
+
+**Request** (all optional)
+
+```json
+{ "name": "Rossmann Express", "sort_order": 3 }
+```
+
+**Response `200`** — `ShoppingLocationOut`.
+
+---
+
+### `DELETE /api/shopping-locations/{location_id}`
+
+**Response `204`**. Items that referenced this location get `location_id` set to `null`.
+
+---
+
 ### `GET /api/shopping-lists/{list_id}/items`
 
 **Response `200`** — `ShoppingItemOut[]`:
@@ -622,6 +671,7 @@ No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** 
     "quantity": "2",
     "unit": "L",
     "category": "Dairy",
+    "location_id": "...",
     "completed_at": null,
     "created_by": "...",
     "completed_by": null,
@@ -642,9 +692,12 @@ No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** 
   "name": "Milk",
   "quantity": 2,
   "unit": "L",
-  "category": "Dairy"
+  "category": "Dairy",
+  "location_id": "..."
 }
 ```
+
+`location_id` is optional. It must belong to the same family as the shopping list.
 
 **Response `200`** — `ShoppingItemOut`. Also broadcasts WebSocket `shopping.item.created`.
 
@@ -660,11 +713,12 @@ No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** 
   "quantity": 1,
   "unit": "L",
   "category": "Dairy",
+  "location_id": null,
   "completed": true
 }
 ```
 
-`completed: true` checks the item off; `completed: false` unchecks it.
+`completed: true` checks the item off; `completed: false` unchecks it. Set `location_id` to `null` to clear the store.
 
 **Response `200`** — `ShoppingItemOut`. Broadcasts `shopping.item.updated` or `shopping.item.completed`.
 
