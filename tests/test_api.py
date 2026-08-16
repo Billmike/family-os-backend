@@ -538,7 +538,7 @@ def test_recurring_event_list_caps_instances(client: TestClient) -> None:
     assert all(row["title"] == "Daily standup" for row in rows)
 
 
-def test_owner_leave_blocked_without_successor(client: TestClient) -> None:
+def test_owner_leave_dissolves_without_successor(client: TestClient) -> None:
     owner = auth_headers(client, "solo-owner@example.com", name="Solo")
     family_id = client.post(
         "/api/families",
@@ -546,12 +546,66 @@ def test_owner_leave_blocked_without_successor(client: TestClient) -> None:
         json={"name": "Solo Family", "timezone": "UTC"},
     ).json()["id"]
     leave = client.post(f"/api/families/{family_id}/leave", headers=owner)
-    assert leave.status_code == 400
-    assert leave.json()["code"] == "owner_leave_blocked"
+    assert leave.status_code == 204
+    assert client.get(f"/api/families/{family_id}", headers=owner).status_code == 404
+    assert client.get("/api/me/families", headers=owner).json() == []
+
+
+def test_owner_leave_with_child_only_dissolves(client: TestClient) -> None:
+    owner = auth_headers(client, "parent-child@example.com", name="Parent")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Parent Child Family", "timezone": "UTC"},
+    ).json()["id"]
+    child = client.post(
+        f"/api/families/{family_id}/members",
+        headers=owner,
+        json={"name": "Kid", "role": "Child"},
+    )
+    assert child.status_code == 200
+
+    leave = client.post(f"/api/families/{family_id}/leave", headers=owner)
+    assert leave.status_code == 204
+    assert client.get(f"/api/families/{family_id}", headers=owner).status_code == 404
+
+
+def test_owner_leave_transfers_to_earliest_parent(client: TestClient) -> None:
+    owner = auth_headers(client, "leave-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=owner,
+        json={"name": "Transfer Family", "timezone": "UTC"},
+    ).json()["id"]
+
+    first_token = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()["invite_token"]
+    first_parent = auth_headers(client, "leave-parent-a@example.com", name="ParentA")
+    assert client.post(f"/api/invitations/{first_token}/accept", headers=first_parent).status_code == 200
+
+    second_token = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={},
+    ).json()["invite_token"]
+    second_parent = auth_headers(client, "leave-parent-b@example.com", name="ParentB")
+    assert client.post(f"/api/invitations/{second_token}/accept", headers=second_parent).status_code == 200
+
+    leave = client.post(f"/api/families/{family_id}/leave", headers=owner)
+    assert leave.status_code == 204
+
+    members = client.get(f"/api/families/{family_id}/members", headers=first_parent).json()
+    by_name = {m["name"]: m for m in members}
+    assert len(members) == 2
+    assert by_name["ParentA"]["role"] == "Owner"
+    assert by_name["ParentB"]["role"] == "Parent"
 
 
 def test_owner_leave_transfers_to_parent(client: TestClient) -> None:
-    owner = auth_headers(client, "leave-owner@example.com", name="Owner")
+    owner = auth_headers(client, "leave-owner-single@example.com", name="Owner")
     family_id = client.post(
         "/api/families",
         headers=owner,
@@ -572,6 +626,61 @@ def test_owner_leave_transfers_to_parent(client: TestClient) -> None:
     assert len(members) == 1
     assert members[0]["role"] == "Owner"
     assert members[0]["name"] == "Parent"
+
+
+def test_owner_can_remove_member(client: TestClient) -> None:
+    owner, partner, family_id, _, partner_member_id = _two_member_family(client, "kick")
+    removed = client.delete(
+        f"/api/families/{family_id}/members/{partner_member_id}",
+        headers=owner,
+    )
+    assert removed.status_code == 204
+
+    members = client.get(f"/api/families/{family_id}/members", headers=owner).json()
+    assert len(members) == 1
+    assert members[0]["name"] == "Owner"
+    assert client.get(f"/api/families/{family_id}", headers=partner).status_code == 404
+
+
+def test_parent_cannot_remove_member(client: TestClient) -> None:
+    owner, partner, family_id, owner_member_id, _ = _two_member_family(client, "kick-parent")
+    res = client.delete(
+        f"/api/families/{family_id}/members/{owner_member_id}",
+        headers=partner,
+    )
+    assert res.status_code == 403
+
+
+def test_owner_cannot_remove_self(client: TestClient) -> None:
+    owner, _, family_id, owner_member_id, _ = _two_member_family(client, "kick-self")
+    res = client.delete(
+        f"/api/families/{family_id}/members/{owner_member_id}",
+        headers=owner,
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "cannot_remove_self"
+
+
+def test_owner_can_delete_family(client: TestClient) -> None:
+    owner, partner, family_id, _, _ = _two_member_family(client, "delete-fam")
+    child = client.post(
+        f"/api/families/{family_id}/members",
+        headers=owner,
+        json={"name": "Kid", "role": "Child"},
+    )
+    assert child.status_code == 200
+
+    deleted = client.delete(f"/api/families/{family_id}", headers=owner)
+    assert deleted.status_code == 204
+    assert client.get(f"/api/families/{family_id}", headers=owner).status_code == 404
+    assert client.get("/api/me/families", headers=owner).json() == []
+    assert client.get("/api/me/families", headers=partner).json() == []
+
+
+def test_parent_cannot_delete_family(client: TestClient) -> None:
+    _, partner, family_id, _, _ = _two_member_family(client, "delete-parent")
+    res = client.delete(f"/api/families/{family_id}", headers=partner)
+    assert res.status_code == 403
 
 
 def test_push_subscribe_rejects_ssrf_endpoints(client: TestClient) -> None:

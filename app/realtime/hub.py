@@ -62,6 +62,13 @@ class ConnectionHub:
             warning="No event loop for WebSocket disconnect",
         )
 
+    def disconnect_family(self, family_id: UUID, *, code: int = 4403) -> None:
+        """Close and unregister every socket in a family room."""
+        self._run(
+            self._disconnect_family(family_id, code),
+            warning="No event loop for WebSocket family disconnect",
+        )
+
     async def _disconnect_user(self, family_id: UUID, user_id: UUID, code: int) -> None:
         async with self._lock:
             users = self._rooms.get(family_id)
@@ -73,6 +80,16 @@ class ConnectionHub:
                 await ws.close(code=code)
             except Exception:  # noqa: BLE001
                 logger.debug("Failed to close WebSocket for user %s", user_id, exc_info=True)
+
+    async def _disconnect_family(self, family_id: UUID, code: int) -> None:
+        async with self._lock:
+            users = self._rooms.pop(family_id, {})
+            sockets = [(uid, ws) for uid, conns in users.items() for ws in conns]
+        for uid, ws in sockets:
+            try:
+                await ws.close(code=code)
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to close WebSocket for user %s", uid, exc_info=True)
 
     def broadcast(self, family_id: UUID, message: dict) -> None:
         """Schedule async broadcast from the event loop or a sync worker thread."""

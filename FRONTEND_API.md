@@ -312,6 +312,28 @@ Auth + membership. Owner/Parent only. Adds a member **without** a user account.
 
 ---
 
+### `DELETE /api/families/{family_id}/members/{member_id}`
+
+Auth + membership. **Owner only.** Removes another member from the family.
+
+Cannot remove yourself (use leave) or the Owner.
+
+**Response `204`** — empty body.
+
+If the removed member had a linked account, their WebSocket for this family is closed (`4403`).
+
+---
+
+### `DELETE /api/families/{family_id}`
+
+Auth + membership. **Owner only.** Permanently deletes the family and all associated data (members, invitations, events, tasks, shopping, notifications).
+
+**Response `204`** — empty body.
+
+All WebSocket clients for the family are disconnected (`4403`).
+
+---
+
 ### `POST /api/families/{family_id}/invitations`
 
 Auth + membership. Owner/Parent only.
@@ -367,9 +389,13 @@ Auth required. `{token}` is the raw `invite_token` from the invitation response.
 
 ### `POST /api/families/{family_id}/leave`
 
-Auth + membership.
+Auth + membership. Removes the current user from the family.
 
-**Response `204`** — empty body.
+If the leaver is the sole Owner and another linked Parent exists, the earliest-joined linked Parent is promoted to Owner.
+
+If no linked adult (Owner/Parent with an account) would remain after leaving, the **family is deleted** (including children and all family data) instead of blocking the leave.
+
+**Response `204`** — empty body. The family may no longer exist; clients should re-list `/api/me/families` and switch or show onboarding.
 
 ---
 
@@ -874,6 +900,7 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 ```
 
 - Auth via query `token` (JWT access token). Invalid → close `4401`. Not a member → close `4403`.
+- Clients should refresh the access token before connect (or on handshake failure), the same way REST retries after `401`.
 - Server pushes JSON text frames after successful mutations. Client may send any text as keep-alive (ignored).
 - Reconnect after a drop and refetch REST lists — frames are not replayed.
 
@@ -1017,6 +1044,8 @@ async function api<T>(
 | PATCH | `/api/families/{family_id}` | Yes |
 | GET | `/api/families/{family_id}/members` | Yes |
 | POST | `/api/families/{family_id}/members` | Yes |
+| DELETE | `/api/families/{family_id}/members/{member_id}` | Yes (Owner) |
+| DELETE | `/api/families/{family_id}` | Yes (Owner) |
 | POST | `/api/families/{family_id}/invitations` | Yes |
 | POST | `/api/invitations/{token}/accept` | Yes |
 | POST | `/api/families/{family_id}/leave` | Yes |

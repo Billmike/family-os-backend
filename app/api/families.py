@@ -82,6 +82,25 @@ def post_member(
     return family_service.member_to_out(created)
 
 
+@router.delete("/api/families/{family_id}/members/{member_id}", status_code=204)
+def delete_member(
+    family_id: UUID,
+    member_id: UUID,
+    member: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> None:
+    family_service.remove_member(db, family_id, member, member_id)
+
+
+@router.delete("/api/families/{family_id}", status_code=204)
+def delete_family(
+    family_id: UUID,
+    member: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> None:
+    family_service.delete_family(db, family_id, member)
+
+
 @router.post("/api/families/{family_id}/invitations", response_model=InvitationOut)
 def post_invitation(
     family_id: UUID,

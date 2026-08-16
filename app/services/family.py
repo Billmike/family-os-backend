@@ -246,6 +246,65 @@ def accept_invitation(
     return family, member
 
 
+def _earliest_linked_parent(
+    db: Session,
+    family_id: UUID,
+    *,
+    exclude_member_id: UUID,
+) -> FamilyMember | None:
+    return (
+        db.query(FamilyMember)
+        .filter(
+            FamilyMember.family_id == family_id,
+            FamilyMember.role == FamilyRole.PARENT,
+            FamilyMember.user_id.isnot(None),
+            FamilyMember.id != exclude_member_id,
+        )
+        .order_by(FamilyMember.created_at.asc())
+        .first()
+    )
+
+
+def delete_family(db: Session, family_id: UUID, actor: FamilyMember) -> None:
+    if actor.role != FamilyRole.OWNER:
+        raise forbidden("Owner role required")
+    _advisory_lock_family(db, family_id)
+    family = get_family(db, family_id)
+    db.delete(family)
+    db.commit()
+    hub.disconnect_family(family_id)
+
+
+def remove_member(
+    db: Session,
+    family_id: UUID,
+    actor: FamilyMember,
+    member_id: UUID,
+) -> None:
+    if actor.role != FamilyRole.OWNER:
+        raise forbidden("Owner role required")
+    if actor.id == member_id:
+        raise bad_request("Cannot remove yourself; leave the family instead", "cannot_remove_self")
+
+    _advisory_lock_family(db, family_id)
+
+    target = (
+        db.query(FamilyMember)
+        .filter(FamilyMember.family_id == family_id, FamilyMember.id == member_id)
+        .first()
+    )
+    if target is None:
+        raise not_found("Member not found")
+    if target.role == FamilyRole.OWNER:
+        raise bad_request("Cannot remove the family owner", "cannot_remove_owner")
+
+    target_user_id = target.user_id
+    db.delete(target)
+    db.commit()
+    if target_user_id is not None:
+        hub.disconnect_user(family_id, target_user_id)
+
+
 def leave_family(db: Session, family_id: UUID, user: User) -> None:
     _advisory_lock_family(db, family_id)
 
@@ -268,24 +327,23 @@ def leave_family(db: Session, family_id: UUID, user: User) -> None:
             .count()
         )
         if other_owners == 0:
-            parent = (
-                db.query(FamilyMember)
-                .filter(
-                    FamilyMember.family_id == family_id,
-                    FamilyMember.role == FamilyRole.PARENT,
-                    FamilyMember.user_id.isnot(None),
-                    FamilyMember.id != member.id,
-                )
-                .first()
-            )
+            parent = _earliest_linked_parent(db, family_id, exclude_member_id=member.id)
             if parent:
                 parent.role = FamilyRole.OWNER
             else:
-                raise bad_request("Owner cannot leave without another adult member", "owner_leave_blocked")
+                family = get_family(db, family_id)
+                db.delete(family)
+                db.commit()
+                hub.disconnect_family(family_id)
+                return
 
     remaining = _count_linked_adults(db, family_id, exclude_member_id=member.id)
     if remaining < 1:
-        raise bad_request("Cannot leave without another adult member", "owner_leave_blocked")
+        family = get_family(db, family_id)
+        db.delete(family)
+        db.commit()
+        hub.disconnect_family(family_id)
+        return
 
     db.delete(member)
     db.commit()
