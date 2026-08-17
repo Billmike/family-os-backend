@@ -755,6 +755,73 @@ No body. Sets `completed_at`. If `recurrence_rule` is set, creates the **next** 
 
 ---
 
+## Shopping sessions (basket)
+
+Family-shared active basket. Marking an item as purchased moves it from the list into the active session. Completing the session archives items and records total cost.
+
+### `GET /api/families/{family_id}/shopping-sessions/active`
+
+**Response `200`** — `ShoppingSessionOut` with nested `items`, or `null` if no active session.
+
+### `POST /api/families/{family_id}/shopping-sessions/active/items`
+
+**Request**
+
+```json
+{ "item_id": "..." }
+```
+
+Creates the active session if needed, snapshots the list item into the basket, and removes it from the shopping list.
+
+**Response `200`**
+
+```json
+{
+  "session": { /* ShoppingSessionOut */ },
+  "item": { /* ShoppingSessionItemOut */ }
+}
+```
+
+Broadcasts `shopping.session.started` (first item only), `shopping.session.item.added`, and `shopping.item.updated` with `{ item_id, deleted: true }`.
+
+### `DELETE /api/shopping-session-items/{session_item_id}`
+
+Undo: restores the item to the family groceries list and removes it from the basket. Active session only.
+
+**Response `200`**
+
+```json
+{
+  "session_id": "...",
+  "item_id": "...",
+  "restored_item": { /* ShoppingItemOut */ }
+}
+```
+
+### `POST /api/families/{family_id}/shopping-sessions/active/complete`
+
+**Request**
+
+```json
+{ "total_cost": "42.50" }
+```
+
+`total_cost` must be greater than zero. Session must contain at least one item.
+
+**Response `200`** — completed `ShoppingSessionOut`. Broadcasts `shopping.session.completed`.
+
+### `GET /api/families/{family_id}/shopping-sessions`
+
+**Query:** `limit` (default 20), `offset` (default 0)
+
+**Response `200`** — completed `ShoppingSessionOut[]` (newest first, `item_count` only; no nested items).
+
+### `GET /api/shopping-sessions/{session_id}`
+
+**Response `200`** — `ShoppingSessionOut` with full `items` array.
+
+---
+
 ## Notifications
 
 ### `GET /api/notifications`
@@ -924,6 +991,34 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 }
 ```
 
+**Shopping sessions**
+
+```json
+{ "type": "shopping.session.started", "session": { } }
+```
+
+```json
+{
+  "type": "shopping.session.item.added",
+  "session": { },
+  "item": { },
+  "removed_item_id": "..."
+}
+```
+
+```json
+{
+  "type": "shopping.session.item.removed",
+  "session_id": "...",
+  "item_id": "...",
+  "restored_item": { }
+}
+```
+
+```json
+{ "type": "shopping.session.completed", "session": { } }
+```
+
 **Events**
 
 ```json
@@ -1066,6 +1161,12 @@ async function api<T>(
 | POST | `/api/shopping-lists/{list_id}/items` | Yes |
 | PATCH | `/api/shopping-items/{item_id}` | Yes |
 | DELETE | `/api/shopping-items/{item_id}` | Yes |
+| GET | `/api/families/{family_id}/shopping-sessions/active` | Yes |
+| POST | `/api/families/{family_id}/shopping-sessions/active/items` | Yes |
+| DELETE | `/api/shopping-session-items/{id}` | Yes |
+| POST | `/api/families/{family_id}/shopping-sessions/active/complete` | Yes |
+| GET | `/api/families/{family_id}/shopping-sessions` | Yes |
+| GET | `/api/shopping-sessions/{session_id}` | Yes |
 | GET | `/api/notifications` | Yes |
 | POST | `/api/notifications/{id}/read` | Yes |
 | POST | `/api/notifications/read-all` | Yes |

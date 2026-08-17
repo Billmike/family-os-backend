@@ -46,11 +46,17 @@ def _ws_url(family_id: str, token: str) -> str:
 
 def _receive_until(ws, expected_type: str, *, limit: int = 10) -> dict:
     """Skip interleaved notification.created frames until the domain event arrives."""
+    skippable = {
+        "notification.created",
+        "shopping.item.created",
+        "shopping.item.updated",
+        "shopping.item.completed",
+    }
     for _ in range(limit):
         msg = ws.receive_json()
         if msg["type"] == expected_type:
             return msg
-        if msg["type"] == "notification.created":
+        if msg["type"] in skippable:
             continue
         raise AssertionError(f"expected {expected_type}, got {msg['type']}")
     raise AssertionError(f"did not receive {expected_type} within {limit} frames")
@@ -115,6 +121,47 @@ def test_ws_shopping_item_broadcast_from_sync_route(client: TestClient) -> None:
         gone = _receive_until(ws, "shopping.item.updated")
         assert gone["deleted"] is True
         assert gone["item_id"] == item_id
+
+
+def test_ws_shopping_session_basket_broadcast(client: TestClient) -> None:
+    family_id, owner_headers, _owner_token, _partner_headers, partner_token = _two_member_family(
+        client
+    )
+    list_id = client.get(
+        f"/api/families/{family_id}/shopping-lists", headers=owner_headers
+    ).json()[0]["id"]
+
+    created = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=owner_headers,
+        json={"name": "Eggs", "category": "Dairy"},
+    )
+    assert created.status_code == 200
+    item_id = created.json()["id"]
+
+    with client.websocket_connect(_ws_url(family_id, partner_token)) as ws:
+        added = client.post(
+            f"/api/families/{family_id}/shopping-sessions/active/items",
+            headers=owner_headers,
+            json={"item_id": item_id},
+        )
+        assert added.status_code == 200
+        session_item_id = added.json()["item"]["id"]
+
+        started = _receive_until(ws, "shopping.session.started")
+        assert started["session"]["status"] == "active"
+
+        item_added = _receive_until(ws, "shopping.session.item.added")
+        assert item_added["item"]["name"] == "Eggs"
+        assert item_added["removed_item_id"] == item_id
+
+        removed = client.delete(
+            f"/api/shopping-session-items/{session_item_id}", headers=owner_headers
+        )
+        assert removed.status_code == 200
+        item_removed = _receive_until(ws, "shopping.session.item.removed")
+        assert item_removed["item_id"] == session_item_id
+        assert item_removed["restored_item"]["name"] == "Eggs"
 
 
 def test_ws_event_broadcast(client: TestClient) -> None:

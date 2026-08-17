@@ -933,3 +933,117 @@ def test_preference_off_skips_notification_and_push(client: TestClient, monkeypa
     partner_notifs = client.get("/api/notifications", headers=partner).json()
     assert not any(n["type"] in ("calendar", "shopping") for n in partner_notifs)
     assert push_calls == []
+
+
+def test_shopping_session_basket_flow(client: TestClient) -> None:
+    headers = auth_headers(client, "session-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Session Family", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
+
+    item_a = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=headers,
+        json={"name": "Milk", "category": "Dairy", "quantity": 2},
+    )
+    assert item_a.status_code == 200
+    item_a_id = item_a.json()["id"]
+
+    item_b = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=headers,
+        json={"name": "Bread", "category": "Other"},
+    )
+    assert item_b.status_code == 200
+    item_b_id = item_b.json()["id"]
+
+    active_empty = client.get(
+        f"/api/families/{family_id}/shopping-sessions/active", headers=headers
+    )
+    assert active_empty.status_code == 200
+    assert active_empty.json() is None
+
+    added = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/items",
+        headers=headers,
+        json={"item_id": item_a_id},
+    )
+    assert added.status_code == 200
+    session_id = added.json()["session"]["id"]
+    session_item_id = added.json()["item"]["id"]
+    assert added.json()["session"]["status"] == "active"
+    assert added.json()["session"]["item_count"] == 1
+
+    items = client.get(f"/api/shopping-lists/{list_id}/items", headers=headers)
+    assert items.status_code == 200
+    assert all(i["id"] != item_a_id for i in items.json())
+    assert any(i["id"] == item_b_id for i in items.json())
+
+    active = client.get(f"/api/families/{family_id}/shopping-sessions/active", headers=headers)
+    assert active.status_code == 200
+    assert active.json()["id"] == session_id
+    assert active.json()["item_count"] == 1
+
+    removed = client.delete(f"/api/shopping-session-items/{session_item_id}", headers=headers)
+    assert removed.status_code == 200
+    assert removed.json()["restored_item"]["name"] == "Milk"
+
+    items_after_undo = client.get(f"/api/shopping-lists/{list_id}/items", headers=headers)
+    assert any(i["name"] == "Milk" for i in items_after_undo.json())
+
+    active_after_undo = client.get(
+        f"/api/families/{family_id}/shopping-sessions/active", headers=headers
+    )
+    assert active_after_undo.json()["item_count"] == 0
+
+    empty_complete = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/complete",
+        headers=headers,
+        json={"total_cost": "10.00"},
+    )
+    assert empty_complete.status_code == 400
+
+    milk_id = next(i["id"] for i in items_after_undo.json() if i["name"] == "Milk")
+    client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/items",
+        headers=headers,
+        json={"item_id": milk_id},
+    )
+    client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/items",
+        headers=headers,
+        json={"item_id": item_b_id},
+    )
+
+    completed = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/complete",
+        headers=headers,
+        json={"total_cost": "42.50"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert float(completed.json()["total_cost"]) == 42.50
+    assert completed.json()["item_count"] == 2
+
+    active_cleared = client.get(
+        f"/api/families/{family_id}/shopping-sessions/active", headers=headers
+    )
+    assert active_cleared.json() is None
+
+    history = client.get(f"/api/families/{family_id}/shopping-sessions", headers=headers)
+    assert history.status_code == 200
+    assert len(history.json()) == 1
+    assert history.json()[0]["item_count"] == 2
+
+    detail = client.get(f"/api/shopping-sessions/{session_id}", headers=headers)
+    assert detail.status_code == 200
+    assert len(detail.json()["items"]) == 2
+    assert {i["name"] for i in detail.json()["items"]} == {"Milk", "Bread"}
+
+    remaining = client.get(f"/api/shopping-lists/{list_id}/items", headers=headers)
+    assert remaining.status_code == 200
+    assert len(remaining.json()) == 0
+
