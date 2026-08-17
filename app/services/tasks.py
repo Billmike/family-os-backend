@@ -120,27 +120,33 @@ def update_task(
     actor: User | None = None,
     background_tasks: BackgroundTasks | None = None,
 ) -> Task:
+    fields_set = data.model_dump(exclude_unset=True)
     previous_assignee_ids: set[UUID] | None = None
-    if data.assignee_ids is not None:
+    if "assignee_ids" in fields_set:
         previous_assignee_ids = {a.family_member_id for a in task.assignees}
-    if data.title is not None:
+    if "title" in fields_set and data.title is not None:
         task.title = data.title.strip()
-    if data.description is not None:
+    if "description" in fields_set:
         task.description = data.description
-    if data.due_at is not None:
-        new_due = ensure_aware(data.due_at)
-        if task.due_at is None or ensure_aware(task.due_at) != new_due:
-            task.last_due_soon_notified_at = None
-        task.due_at = new_due
-    if data.priority is not None:
+    if "due_at" in fields_set:
+        if data.due_at is None:
+            task.due_at = None
+        else:
+            new_due = ensure_aware(data.due_at)
+            if task.due_at is None or ensure_aware(task.due_at) != new_due:
+                task.last_due_soon_notified_at = None
+            task.due_at = new_due
+    if "priority" in fields_set and data.priority is not None:
         task.priority = data.priority
-    if data.category is not None:
+    if "category" in fields_set:
         task.category = data.category
-    if data.recurrence_rule is not None:
+    if "recurrence_rule" in fields_set:
         task.recurrence_rule = data.recurrence_rule
-    if data.completed_at is not None:
-        task.completed_at = ensure_aware(data.completed_at)
-    if data.assignee_ids is not None:
+    if "completed_at" in fields_set:
+        task.completed_at = (
+            ensure_aware(data.completed_at) if data.completed_at is not None else None
+        )
+    if "assignee_ids" in fields_set and data.assignee_ids is not None:
         _validate_assignees(db, task.family_id, data.assignee_ids)
         task.assignees.clear()
         db.flush()
