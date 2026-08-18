@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from app.schemas.event import MAX_EVENT_DESCRIPTION, MAX_EVENT_LOCATION
 from tests.conftest import auth_headers
@@ -1046,4 +1047,124 @@ def test_shopping_session_basket_flow(client: TestClient) -> None:
     remaining = client.get(f"/api/shopping-lists/{list_id}/items", headers=headers)
     assert remaining.status_code == 200
     assert len(remaining.json()) == 0
+
+
+def _add_and_complete_trip(
+    client: TestClient,
+    headers: dict,
+    family_id: str,
+    list_id: str,
+    name: str,
+    cost: str,
+) -> dict:
+    item = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=headers,
+        json={"name": name},
+    )
+    assert item.status_code == 200
+    added = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/items",
+        headers=headers,
+        json={"item_id": item.json()["id"]},
+    )
+    assert added.status_code == 200
+    completed = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/complete",
+        headers=headers,
+        json={"total_cost": cost},
+    )
+    assert completed.status_code == 200
+    return completed.json()
+
+
+def test_shopping_spend_monthly_totals(client: TestClient) -> None:
+    headers = auth_headers(client, "spend-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Spend Family", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
+
+    empty = client.get(f"/api/families/{family_id}/shopping-spend?months=3", headers=headers)
+    assert empty.status_code == 200
+    body = empty.json()
+    assert len(body["months"]) == 3
+    assert body["currency"] == "EUR"
+    assert all(float(row["total"]) == 0 for row in body["months"])
+    assert float(body["year_to_date_total"]) == 0
+    assert body["months"][-1]["month"] == body["current_month"]
+
+    _add_and_complete_trip(client, headers, family_id, list_id, "Milk", "10.00")
+    _add_and_complete_trip(client, headers, family_id, list_id, "Bread", "5.50")
+
+    spend = client.get(f"/api/families/{family_id}/shopping-spend?months=3", headers=headers)
+    assert spend.status_code == 200
+    data = spend.json()
+    current = data["months"][-1]
+    assert float(current["total"]) == 15.50
+    assert current["trip_count"] == 2
+    assert float(current["average"]) == 7.75
+    assert float(data["year_to_date_total"]) == 15.50
+    assert data["months"][0]["trip_count"] == 0
+
+    month = data["current_month"]
+    history = client.get(
+        f"/api/families/{family_id}/shopping-sessions?month={month}",
+        headers=headers,
+    )
+    assert history.status_code == 200
+    assert len(history.json()) == 2
+
+    other = client.get(
+        f"/api/families/{family_id}/shopping-sessions?month=2020-01",
+        headers=headers,
+    )
+    assert other.status_code == 200
+    assert other.json() == []
+
+    bad = client.get(
+        f"/api/families/{family_id}/shopping-sessions?month=2026-13",
+        headers=headers,
+    )
+    assert bad.status_code == 400
+
+
+def test_shopping_spend_timezone_month_bucket(client: TestClient, db_session: Session) -> None:
+    from uuid import UUID
+
+    from app.models.shopping_session import ShoppingSession
+
+    headers = auth_headers(client, "tz-spend@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Berlin Spend", "timezone": "Europe/Berlin"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
+    trip = _add_and_complete_trip(client, headers, family_id, list_id, "Coffee", "8.00")
+
+    session = db_session.get(ShoppingSession, UUID(trip["id"]))
+    assert session is not None
+    session.completed_at = datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)
+    db_session.commit()
+
+    spend = client.get(f"/api/families/{family_id}/shopping-spend?months=12", headers=headers)
+    assert spend.status_code == 200
+    by_month = {row["month"]: row for row in spend.json()["months"]}
+    assert float(by_month["2026-08"]["total"]) == 8.00
+    assert by_month["2026-08"]["trip_count"] == 1
+    assert by_month["2026-07"]["trip_count"] == 0
+
+    august = client.get(
+        f"/api/families/{family_id}/shopping-sessions?month=2026-08",
+        headers=headers,
+    )
+    july = client.get(
+        f"/api/families/{family_id}/shopping-sessions?month=2026-07",
+        headers=headers,
+    )
+    assert len(august.json()) == 1
+    assert july.json() == []
 

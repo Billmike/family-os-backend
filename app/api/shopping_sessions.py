@@ -9,12 +9,14 @@ from app.core.exceptions import not_found
 from app.models.family import FamilyMember
 from app.models.shopping_session import ShoppingSessionItem
 from app.models.user import User
+from app.services import family as family_service
 from app.schemas.shopping_session import (
     AddToBasketRequest,
     AddToBasketResponse,
     CompleteSessionRequest,
     RemoveFromBasketResponse,
     ShoppingSessionOut,
+    ShoppingSpendOut,
 )
 from app.services import shopping_session as session_service
 
@@ -96,12 +98,35 @@ def complete_session(
 )
 def list_sessions(
     family_id: UUID,
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    month: str | None = Query(default=None),
     _: FamilyMember = Depends(require_family_member),
     db: Session = Depends(get_db),
 ) -> list[ShoppingSessionOut]:
-    return session_service.list_completed_sessions(db, family_id, limit=limit, offset=offset)
+    family = family_service.get_family(db, family_id)
+    return session_service.list_completed_sessions(
+        db,
+        family_id,
+        limit=limit,
+        offset=offset,
+        month=month,
+        timezone_name=family.timezone,
+    )
+
+
+@router.get(
+    "/api/families/{family_id}/shopping-spend",
+    response_model=ShoppingSpendOut,
+)
+def shopping_spend(
+    family_id: UUID,
+    months: int = Query(default=12, ge=1, le=36),
+    _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> ShoppingSpendOut:
+    family = family_service.get_family(db, family_id)
+    return session_service.get_shopping_spend(db, family, months=months)
 
 
 @router.get("/api/shopping-sessions/{session_id}", response_model=ShoppingSessionOut)

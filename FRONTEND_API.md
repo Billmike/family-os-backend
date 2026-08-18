@@ -812,9 +812,43 @@ Undo: restores the item to the family groceries list and removes it from the bas
 
 ### `GET /api/families/{family_id}/shopping-sessions`
 
-**Query:** `limit` (default 20), `offset` (default 0)
+**Query:** `limit` (default 20, max 200), `offset` (default 0), `month` (optional `YYYY-MM`, family timezone)
 
-**Response `200`** — completed `ShoppingSessionOut[]` (newest first, `item_count` only; no nested items).
+**Response `200`** — completed `ShoppingSessionOut[]` (newest first, `item_count` only; no nested items). When `month` is set, only trips completed in that calendar month (family timezone) are returned.
+
+**Response `400`** — `month` is not a valid `YYYY-MM`.
+
+### `GET /api/families/{family_id}/shopping-spend`
+
+Monthly grocery spend for Insights. Totals are trip-level (`total_cost` on completed sessions). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+
+**Query:** `months` (default 12, min 1, max 36) — number of months ending at the current family month.
+
+**Response `200`**
+
+```json
+{
+  "currency": "EUR",
+  "current_month": "2026-08",
+  "year_to_date_total": "124.50",
+  "months": [
+    {
+      "month": "2025-09",
+      "total": "0.00",
+      "trip_count": 0,
+      "average": "0.00"
+    },
+    {
+      "month": "2026-08",
+      "total": "124.50",
+      "trip_count": 3,
+      "average": "41.50"
+    }
+  ]
+}
+```
+
+`average` is `0.00` when `trip_count` is 0. `year_to_date_total` is the sum of completed trips in the current calendar year (family timezone).
 
 ### `GET /api/shopping-sessions/{session_id}`
 
@@ -1166,6 +1200,7 @@ async function api<T>(
 | DELETE | `/api/shopping-session-items/{id}` | Yes |
 | POST | `/api/families/{family_id}/shopping-sessions/active/complete` | Yes |
 | GET | `/api/families/{family_id}/shopping-sessions` | Yes |
+| GET | `/api/families/{family_id}/shopping-spend` | Yes |
 | GET | `/api/shopping-sessions/{session_id}` | Yes |
 | GET | `/api/notifications` | Yes |
 | POST | `/api/notifications/{id}/read` | Yes |

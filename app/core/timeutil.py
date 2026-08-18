@@ -1,12 +1,53 @@
+import re
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+YEAR_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 
 
 def ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def family_zone(tz_name: str) -> ZoneInfo:
+    return ZoneInfo(tz_name) if _valid_tz(tz_name) else ZoneInfo("UTC")
+
+
+def parse_year_month(value: str) -> tuple[int, int]:
+    match = YEAR_MONTH_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError("month must be YYYY-MM")
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if month < 1 or month > 12:
+        raise ValueError("month must be YYYY-MM")
+    return year, month
+
+
+def add_calendar_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
+
+def month_key(dt: datetime, tz_name: str) -> str:
+    local = ensure_aware(dt).astimezone(family_zone(tz_name))
+    return f"{local.year:04d}-{local.month:02d}"
+
+
+def month_bounds(
+    tz_name: str, year: int | None = None, month: int | None = None
+) -> tuple[datetime, datetime]:
+    tz = family_zone(tz_name)
+    now = family_now(tz_name)
+    y = year if year is not None else now.year
+    m = month if month is not None else now.month
+    start = datetime(y, m, 1, tzinfo=tz)
+    next_y, next_m = add_calendar_months(y, m, 1)
+    end = datetime(next_y, next_m, 1, tzinfo=tz)
+    return start, end
 
 
 def add_months(dt: datetime, months: int = 1) -> datetime:
@@ -17,16 +58,12 @@ def add_months(dt: datetime, months: int = 1) -> datetime:
 
 
 def family_now(tz_name: str) -> datetime:
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz)
+    return datetime.now(family_zone(tz_name))
 
 
 def day_bounds(tz_name: str, day: datetime | None = None) -> tuple[datetime, datetime]:
     now = day or family_now(tz_name)
-    local = now.astimezone(ZoneInfo(tz_name) if _valid_tz(tz_name) else ZoneInfo("UTC"))
+    local = now.astimezone(family_zone(tz_name))
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     return start, end

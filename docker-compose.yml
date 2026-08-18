@@ -26,6 +26,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in backend/.env}
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       ENVIRONMENT: development
+    volumes:
+      # Bind-mount source so --reload picks up local edits without a rebuild
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
     depends_on:
       db:
         condition: service_healthy

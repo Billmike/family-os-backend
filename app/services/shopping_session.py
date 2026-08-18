@@ -1,5 +1,6 @@
+from collections import defaultdict
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import BackgroundTasks
@@ -7,6 +8,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import bad_request, conflict, not_found
+from app.core.timeutil import (
+    add_calendar_months,
+    ensure_aware,
+    family_now,
+    month_key,
+    parse_year_month,
+)
+from app.models.family import Family
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
 from app.models.shopping_session import (
     SESSION_STATUS_ACTIVE,
@@ -20,9 +29,11 @@ from app.schemas.shopping import ShoppingItemOut, ShoppingListCreate
 from app.schemas.shopping_session import (
     AddToBasketResponse,
     CompleteSessionRequest,
+    MonthlySpendOut,
     RemoveFromBasketResponse,
     ShoppingSessionItemOut,
     ShoppingSessionOut,
+    ShoppingSpendOut,
 )
 from app.services import notifications as notification_service
 from app.services import shopping as shopping_service
@@ -280,22 +291,103 @@ def complete_session(
     return session_out
 
 
-def list_completed_sessions(
-    db: Session, family_id: UUID, *, limit: int = 20, offset: int = 0
-) -> list[ShoppingSessionOut]:
-    sessions = (
-        db.query(ShoppingSession)
-        .options(joinedload(ShoppingSession.items))
-        .filter(
-            ShoppingSession.family_id == family_id,
-            ShoppingSession.status == SESSION_STATUS_COMPLETED,
-        )
-        .order_by(ShoppingSession.completed_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+_MONEY = Decimal("0.01")
+_ZERO = Decimal("0.00")
+
+
+def _as_money(value: Decimal | None) -> Decimal:
+    amount = Decimal(str(value)) if value is not None else _ZERO
+    return amount.quantize(_MONEY, rounding=ROUND_HALF_UP)
+
+
+def _completed_sessions(
+    db: Session, family_id: UUID, *, load_items: bool = False
+) -> list[ShoppingSession]:
+    query = db.query(ShoppingSession).filter(
+        ShoppingSession.family_id == family_id,
+        ShoppingSession.status == SESSION_STATUS_COMPLETED,
+        ShoppingSession.completed_at.isnot(None),
     )
-    return [_session_to_out(s, include_items=False) for s in sessions]
+    if load_items:
+        query = query.options(joinedload(ShoppingSession.items))
+    return query.order_by(ShoppingSession.completed_at.desc()).all()
+
+
+def list_completed_sessions(
+    db: Session,
+    family_id: UUID,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    month: str | None = None,
+    timezone_name: str = "UTC",
+) -> list[ShoppingSessionOut]:
+    sessions = _completed_sessions(db, family_id, load_items=True)
+    if month is not None:
+        try:
+            parse_year_month(month)
+        except ValueError as exc:
+            raise bad_request(str(exc)) from exc
+        sessions = [
+            session
+            for session in sessions
+            if session.completed_at is not None
+            and month_key(session.completed_at, timezone_name) == month
+        ]
+    page = sessions[offset : offset + limit]
+    return [_session_to_out(s, include_items=False) for s in page]
+
+
+def get_shopping_spend(db: Session, family: Family, *, months: int = 12) -> ShoppingSpendOut:
+    now = family_now(family.timezone)
+    current_month = f"{now.year:04d}-{now.month:02d}"
+    window_keys: list[str] = []
+    start_year, start_month = add_calendar_months(now.year, now.month, -(months - 1))
+    for i in range(months):
+        year, month = add_calendar_months(start_year, start_month, i)
+        window_keys.append(f"{year:04d}-{month:02d}")
+
+    sessions = _completed_sessions(db, family.id)
+    totals: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    counts: dict[str, int] = defaultdict(int)
+    year_to_date = _ZERO
+    currency = "EUR"
+    latest_at: datetime | None = None
+
+    for session in sessions:
+        if session.completed_at is None:
+            continue
+        key = month_key(session.completed_at, family.timezone)
+        cost = _as_money(session.total_cost)
+        totals[key] += cost
+        counts[key] += 1
+        if key.startswith(f"{now.year:04d}-"):
+            year_to_date += cost
+        completed_at = ensure_aware(session.completed_at)
+        if latest_at is None or completed_at > latest_at:
+            latest_at = completed_at
+            currency = session.currency or "EUR"
+
+    month_rows: list[MonthlySpendOut] = []
+    for key in window_keys:
+        trip_count = counts[key]
+        total = _as_money(totals[key])
+        average = _as_money(total / trip_count) if trip_count else _ZERO
+        month_rows.append(
+            MonthlySpendOut(
+                month=key,
+                total=total,
+                trip_count=trip_count,
+                average=average,
+            )
+        )
+
+    return ShoppingSpendOut(
+        currency=currency,
+        current_month=current_month,
+        year_to_date_total=_as_money(year_to_date),
+        months=month_rows,
+    )
 
 
 def get_session(db: Session, session_id: UUID) -> ShoppingSession:

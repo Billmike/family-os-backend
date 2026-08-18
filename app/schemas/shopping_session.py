@@ -44,6 +44,20 @@ class CompleteSessionRequest(BaseModel):
     total_cost: Decimal = Field(gt=0)
 
 
+class MonthlySpendOut(BaseModel):
+    month: str
+    total: Decimal
+    trip_count: int
+    average: Decimal
+
+
+class ShoppingSpendOut(BaseModel):
+    currency: str
+    current_month: str
+    year_to_date_total: Decimal
+    months: list[MonthlySpendOut]
+
+
 class AddToBasketResponse(BaseModel):
     session: ShoppingSessionOut
     item: ShoppingSessionItemOut
