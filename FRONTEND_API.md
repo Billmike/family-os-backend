@@ -808,7 +808,7 @@ Undo: restores the item to the family groceries list and removes it from the bas
 
 `total_cost` must be greater than zero. Session must contain at least one item.
 
-**Response `200`** — completed `ShoppingSessionOut`. Broadcasts `shopping.session.completed`.
+**Response `200`** — completed `ShoppingSessionOut`. Broadcasts `shopping.session.completed` and `expense.created` (a `Shopping` ledger row for the trip total).
 
 ### `GET /api/families/{family_id}/shopping-sessions`
 
@@ -820,7 +820,9 @@ Undo: restores the item to the family groceries list and removes it from the bas
 
 ### `GET /api/families/{family_id}/shopping-spend`
 
-Monthly grocery spend for Insights. Totals are trip-level (`total_cost` on completed sessions). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+Monthly **grocery** spend (`category=Shopping` on the household expense ledger). Completing a shopping trip writes that row. Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+
+Prefer `GET /api/families/{family_id}/spend` for Insights (all categories).
 
 **Query:** `months` (default 12, min 1, max 36) — number of months ending at the current family month.
 
@@ -848,11 +850,119 @@ Monthly grocery spend for Insights. Totals are trip-level (`total_cost` on compl
 }
 ```
 
-`average` is `0.00` when `trip_count` is 0. `year_to_date_total` is the sum of completed trips in the current calendar year (family timezone).
+`average` is `0.00` when `trip_count` is 0. `year_to_date_total` is the sum of Shopping expenses in the current calendar year (family timezone). `trip_count` is the number of Shopping expenses in that month.
 
 ### `GET /api/shopping-sessions/{session_id}`
 
 **Response `200`** — `ShoppingSessionOut` with full `items` array.
+
+---
+
+## Expenses
+
+Household spend ledger. Completing a shopping trip inserts a `Shopping` expense (`source_type: "shopping_session"`). Manual entries use `source_type: "manual"`.
+
+Categories: `Shopping`, `Transportation`, `Housing`, `Utilities`, `Dining`, `Health`, `Childcare`, `Other`.
+
+### `POST /api/families/{family_id}/expenses`
+
+Create a manual expense.
+
+**Request**
+
+```json
+{
+  "amount": "89.00",
+  "category": "Transportation",
+  "merchant": "Miles Berlin",
+  "note": "Weekend car rental",
+  "occurred_at": "2026-08-18T12:00:00Z"
+}
+```
+
+| Field | Notes |
+|-------|--------|
+| `amount` | Required, greater than zero |
+| `category` | Required, one of the categories above |
+| `merchant` | Optional, max 120 |
+| `note` | Optional, max 500 |
+| `occurred_at` | Optional ISO datetime; defaults to now |
+| `currency` | Optional, 3-letter code, default `EUR` |
+
+**Response `200`** — `ExpenseOut`. Broadcasts `expense.created`.
+
+```json
+{
+  "id": "...",
+  "family_id": "...",
+  "amount": "89.00",
+  "currency": "EUR",
+  "category": "Transportation",
+  "merchant": "Miles Berlin",
+  "note": "Weekend car rental",
+  "occurred_at": "2026-08-18T12:00:00Z",
+  "created_by": "...",
+  "source_type": "manual",
+  "source_id": null,
+  "source_item_count": null,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+`source_item_count` is the basket item count when `source_type` is `shopping_session`, otherwise `null`.
+
+### `GET /api/families/{family_id}/expenses`
+
+**Query:** `month` (required `YYYY-MM`, family timezone)
+
+**Response `200`** — `ExpenseOut[]` newest `occurred_at` first.
+
+**Response `400`** — `month` is not a valid `YYYY-MM`.
+
+### `GET /api/families/{family_id}/spend`
+
+Monthly household spend for Insights. Totals come from the expense ledger (all categories). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+
+**Query:** `months` (default 12, min 1, max 36)
+
+**Response `200`**
+
+```json
+{
+  "currency": "EUR",
+  "current_month": "2026-08",
+  "year_to_date_total": "500.00",
+  "months": [
+    {
+      "month": "2026-08",
+      "total": "180.00",
+      "entry_count": 4,
+      "average": "45.00",
+      "categories": [
+        { "category": "Shopping", "total": "80.00", "count": 2 },
+        { "category": "Transportation", "total": "100.00", "count": 2 }
+      ]
+    }
+  ]
+}
+```
+
+`average` is `0.00` when `entry_count` is 0. `year_to_date_total` is the sum of all expenses in the current calendar year (family timezone). Category rows are omitted when a month has no spend.
+
+### `PATCH /api/expenses/{expense_id}`
+
+Update a **manual** expense. Shopping-sourced rows return `400`.
+
+**Request** — any subset of `amount`, `category`, `merchant`, `note`, `occurred_at`.
+
+**Response `200`** — `ExpenseOut`. Broadcasts `expense.updated`.
+
+**Response `400`** — expense was created from a shopping trip.
+
+### `DELETE /api/expenses/{expense_id}`
+
+**Response `204`**. Broadcasts `{ "type": "expense.deleted", "expense_id": "..." }`. Manual expenses only; shopping-sourced rows return `400`.
 
 ---
 
@@ -1053,6 +1163,18 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 { "type": "shopping.session.completed", "session": { } }
 ```
 
+**Expenses**
+
+```json
+{ "type": "expense.created", "expense": { } }
+```
+
+`expense.updated` uses the same `{ expense }` shape.
+
+```json
+{ "type": "expense.deleted", "expense_id": "..." }
+```
+
 **Events**
 
 ```json
@@ -1202,6 +1324,11 @@ async function api<T>(
 | GET | `/api/families/{family_id}/shopping-sessions` | Yes |
 | GET | `/api/families/{family_id}/shopping-spend` | Yes |
 | GET | `/api/shopping-sessions/{session_id}` | Yes |
+| POST | `/api/families/{family_id}/expenses` | Yes |
+| GET | `/api/families/{family_id}/expenses` | Yes |
+| GET | `/api/families/{family_id}/spend` | Yes |
+| PATCH | `/api/expenses/{expense_id}` | Yes |
+| DELETE | `/api/expenses/{expense_id}` | Yes |
 | GET | `/api/notifications` | Yes |
 | POST | `/api/notifications/{id}/read` | Yes |
 | POST | `/api/notifications/read-all` | Yes |

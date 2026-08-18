@@ -1,6 +1,4 @@
-from collections import defaultdict
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import BackgroundTasks
@@ -8,13 +6,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import bad_request, conflict, not_found
-from app.core.timeutil import (
-    add_calendar_months,
-    ensure_aware,
-    family_now,
-    month_key,
-    parse_year_month,
-)
+from app.core.timeutil import month_key, parse_year_month
+from app.models.expense import CATEGORY_SHOPPING
 from app.models.family import Family
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
 from app.models.shopping_session import (
@@ -35,6 +28,7 @@ from app.schemas.shopping_session import (
     ShoppingSessionOut,
     ShoppingSpendOut,
 )
+from app.services import expense as expense_service
 from app.services import notifications as notification_service
 from app.services import shopping as shopping_service
 
@@ -264,16 +258,28 @@ def complete_session(
     session.completed_by = user.id
     session.total_cost = data.total_cost
     session.updated_at = now
+    expense = expense_service.record_shopping_session_expense(db, session=session, user=user)
     db.commit()
     db.refresh(session)
+    db.refresh(expense)
 
     session_out = _session_to_out(session)
+    item_count = session_out.item_count
     cost_label = f"€{data.total_cost:.2f}"
     hub.broadcast(
         family_id,
         {
             "type": "shopping.session.completed",
             "session": session_out.model_dump(mode="json"),
+        },
+    )
+    hub.broadcast(
+        family_id,
+        {
+            "type": "expense.created",
+            "expense": expense_service.expense_to_out(
+                expense, source_item_count=item_count
+            ).model_dump(mode="json"),
         },
     )
     notification_service.notify_family_members(
@@ -289,15 +295,6 @@ def complete_session(
         background_tasks=background_tasks,
     )
     return session_out
-
-
-_MONEY = Decimal("0.01")
-_ZERO = Decimal("0.00")
-
-
-def _as_money(value: Decimal | None) -> Decimal:
-    amount = Decimal(str(value)) if value is not None else _ZERO
-    return amount.quantize(_MONEY, rounding=ROUND_HALF_UP)
 
 
 def _completed_sessions(
@@ -339,54 +336,20 @@ def list_completed_sessions(
 
 
 def get_shopping_spend(db: Session, family: Family, *, months: int = 12) -> ShoppingSpendOut:
-    now = family_now(family.timezone)
-    current_month = f"{now.year:04d}-{now.month:02d}"
-    window_keys: list[str] = []
-    start_year, start_month = add_calendar_months(now.year, now.month, -(months - 1))
-    for i in range(months):
-        year, month = add_calendar_months(start_year, start_month, i)
-        window_keys.append(f"{year:04d}-{month:02d}")
-
-    sessions = _completed_sessions(db, family.id)
-    totals: dict[str, Decimal] = defaultdict(lambda: _ZERO)
-    counts: dict[str, int] = defaultdict(int)
-    year_to_date = _ZERO
-    currency = "EUR"
-    latest_at: datetime | None = None
-
-    for session in sessions:
-        if session.completed_at is None:
-            continue
-        key = month_key(session.completed_at, family.timezone)
-        cost = _as_money(session.total_cost)
-        totals[key] += cost
-        counts[key] += 1
-        if key.startswith(f"{now.year:04d}-"):
-            year_to_date += cost
-        completed_at = ensure_aware(session.completed_at)
-        if latest_at is None or completed_at > latest_at:
-            latest_at = completed_at
-            currency = session.currency or "EUR"
-
-    month_rows: list[MonthlySpendOut] = []
-    for key in window_keys:
-        trip_count = counts[key]
-        total = _as_money(totals[key])
-        average = _as_money(total / trip_count) if trip_count else _ZERO
-        month_rows.append(
-            MonthlySpendOut(
-                month=key,
-                total=total,
-                trip_count=trip_count,
-                average=average,
-            )
-        )
-
+    spend = expense_service.get_spend(db, family, months=months, category=CATEGORY_SHOPPING)
     return ShoppingSpendOut(
-        currency=currency,
-        current_month=current_month,
-        year_to_date_total=_as_money(year_to_date),
-        months=month_rows,
+        currency=spend.currency,
+        current_month=spend.current_month,
+        year_to_date_total=spend.year_to_date_total,
+        months=[
+            MonthlySpendOut(
+                month=row.month,
+                total=row.total,
+                trip_count=row.entry_count,
+                average=row.average,
+            )
+            for row in spend.months
+        ],
     )
 
 

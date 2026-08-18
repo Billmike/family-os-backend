@@ -1,4 +1,5 @@
 from app.models.event import Event, EventMember, EventReminder
+from app.models.expense import Expense
 from app.models.family import Family, FamilyInvitation, FamilyMember
 from app.models.notification import Notification, NotificationPreference, PushSubscription
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
@@ -21,6 +22,7 @@ __all__ = [
     "ShoppingItem",
     "ShoppingSession",
     "ShoppingSessionItem",
+    "Expense",
     "Notification",
     "NotificationPreference",
     "PushSubscription",

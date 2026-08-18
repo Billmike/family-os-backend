@@ -1134,6 +1134,7 @@ def test_shopping_spend_monthly_totals(client: TestClient) -> None:
 def test_shopping_spend_timezone_month_bucket(client: TestClient, db_session: Session) -> None:
     from uuid import UUID
 
+    from app.models.expense import Expense
     from app.models.shopping_session import ShoppingSession
 
     headers = auth_headers(client, "tz-spend@example.com", name="Owner")
@@ -1148,6 +1149,12 @@ def test_shopping_spend_timezone_month_bucket(client: TestClient, db_session: Se
     session = db_session.get(ShoppingSession, UUID(trip["id"]))
     assert session is not None
     session.completed_at = datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)
+    expense = (
+        db_session.query(Expense)
+        .filter(Expense.source_id == UUID(trip["id"]))
+        .one()
+    )
+    expense.occurred_at = datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)
     db_session.commit()
 
     spend = client.get(f"/api/families/{family_id}/shopping-spend?months=12", headers=headers)
@@ -1167,4 +1174,113 @@ def test_shopping_spend_timezone_month_bucket(client: TestClient, db_session: Se
     )
     assert len(august.json()) == 1
     assert july.json() == []
+
+
+def test_complete_session_creates_shopping_expense(client: TestClient) -> None:
+    headers = auth_headers(client, "expense-trip@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Expense Trip", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
+    trip = _add_and_complete_trip(client, headers, family_id, list_id, "Milk", "12.40")
+    month = trip["completed_at"][:7]
+
+    rows = client.get(f"/api/families/{family_id}/expenses?month={month}", headers=headers)
+    assert rows.status_code == 200
+    data = rows.json()
+    assert len(data) == 1
+    assert data[0]["category"] == "Shopping"
+    assert data[0]["source_type"] == "shopping_session"
+    assert data[0]["source_id"] == trip["id"]
+    assert float(data[0]["amount"]) == 12.40
+    assert data[0]["source_item_count"] == 1
+
+    blocked = client.patch(
+        f"/api/expenses/{data[0]['id']}",
+        headers=headers,
+        json={"amount": "1.00"},
+    )
+    assert blocked.status_code == 400
+
+    blocked_del = client.delete(f"/api/expenses/{data[0]['id']}", headers=headers)
+    assert blocked_del.status_code == 400
+
+
+def test_manual_expense_crud_and_spend_breakdown(client: TestClient) -> None:
+    headers = auth_headers(client, "expense-owner@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Ledger Family", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
+    _add_and_complete_trip(client, headers, family_id, list_id, "Bread", "10.00")
+
+    created = client.post(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        json={
+            "amount": "89.00",
+            "category": "Transportation",
+            "merchant": "Miles Berlin",
+            "note": "Weekend car rental",
+        },
+    )
+    assert created.status_code == 200
+    expense = created.json()
+    assert expense["merchant"] == "Miles Berlin"
+    assert expense["source_type"] == "manual"
+    assert expense["category"] == "Transportation"
+
+    spend = client.get(f"/api/families/{family_id}/spend?months=3", headers=headers)
+    assert spend.status_code == 200
+    current = spend.json()["months"][-1]
+    assert float(current["total"]) == 99.00
+    assert current["entry_count"] == 2
+    by_cat = {row["category"]: row for row in current["categories"]}
+    assert float(by_cat["Shopping"]["total"]) == 10.00
+    assert by_cat["Shopping"]["count"] == 1
+    assert float(by_cat["Transportation"]["total"]) == 89.00
+    assert by_cat["Transportation"]["count"] == 1
+
+    grocery_only = client.get(f"/api/families/{family_id}/shopping-spend?months=3", headers=headers)
+    assert grocery_only.status_code == 200
+    grocery_month = grocery_only.json()["months"][-1]
+    assert float(grocery_month["total"]) == 10.00
+    assert grocery_month["trip_count"] == 1
+
+    month = spend.json()["current_month"]
+    listed = client.get(f"/api/families/{family_id}/expenses?month={month}", headers=headers)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 2
+
+    patched = client.patch(
+        f"/api/expenses/{expense['id']}",
+        headers=headers,
+        json={"amount": "100.00", "merchant": "Miles"},
+    )
+    assert patched.status_code == 200
+    assert float(patched.json()["amount"]) == 100.00
+    assert patched.json()["merchant"] == "Miles"
+
+    deleted = client.delete(f"/api/expenses/{expense['id']}", headers=headers)
+    assert deleted.status_code == 204
+
+    after = client.get(f"/api/families/{family_id}/spend?months=3", headers=headers)
+    current_after = after.json()["months"][-1]
+    assert float(current_after["total"]) == 10.00
+    assert current_after["entry_count"] == 1
+
+
+def test_list_expenses_rejects_invalid_month(client: TestClient) -> None:
+    headers = auth_headers(client, "expense-month@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Month Family", "timezone": "UTC"},
+    ).json()["id"]
+    bad = client.get(f"/api/families/{family_id}/expenses?month=2026-13", headers=headers)
+    assert bad.status_code == 400
 
