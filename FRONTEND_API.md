@@ -822,7 +822,7 @@ Undo: restores the item to the family groceries list and removes it from the bas
 
 Monthly **grocery** spend (`category=Shopping` on the household expense ledger). Completing a shopping trip writes that row. Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
 
-Prefer `GET /api/families/{family_id}/spend` for Insights (all categories).
+Prefer `GET /api/families/{family_id}/spend` for Expenses (all categories).
 
 **Query:** `months` (default 12, min 1, max 36) — number of months ending at the current family month.
 
@@ -922,7 +922,7 @@ Create a manual expense.
 
 ### `GET /api/families/{family_id}/spend`
 
-Monthly household spend for Insights. Totals come from the expense ledger (all categories). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+Monthly household spend for Expenses. Totals come from the expense ledger (all categories). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
 
 **Query:** `months` (default 12, min 1, max 36)
 

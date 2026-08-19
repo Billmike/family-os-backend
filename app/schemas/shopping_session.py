@@ -58,6 +58,10 @@ class ShoppingSpendOut(BaseModel):
     months: list[MonthlySpendOut]
 
 
+class UpdateSessionItemRequest(BaseModel):
+    quantity: Decimal = Field(gt=0)
+
+
 class AddToBasketResponse(BaseModel):
     session: ShoppingSessionOut
     item: ShoppingSessionItemOut

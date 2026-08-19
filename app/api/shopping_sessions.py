@@ -15,8 +15,10 @@ from app.schemas.shopping_session import (
     AddToBasketResponse,
     CompleteSessionRequest,
     RemoveFromBasketResponse,
+    ShoppingSessionItemOut,
     ShoppingSessionOut,
     ShoppingSpendOut,
+    UpdateSessionItemRequest,
 )
 from app.services import shopping_session as session_service
 
@@ -127,6 +129,38 @@ def shopping_spend(
 ) -> ShoppingSpendOut:
     family = family_service.get_family(db, family_id)
     return session_service.get_shopping_spend(db, family, months=months)
+
+
+@router.post(
+    "/api/families/{family_id}/shopping-sessions/{session_id}/reorder",
+    response_model=ShoppingSessionOut,
+)
+def reorder_session(
+    family_id: UUID,
+    session_id: UUID,
+    user: User = Depends(get_current_user),
+    _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> ShoppingSessionOut:
+    return session_service.reorder_session(db, family_id, session_id, user)
+
+
+@router.patch(
+    "/api/shopping-session-items/{session_item_id}",
+    response_model=ShoppingSessionItemOut,
+)
+def update_session_item(
+    session_item_id: UUID,
+    data: UpdateSessionItemRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ShoppingSessionItemOut:
+    item = db.get(ShoppingSessionItem, session_item_id)
+    if item is None:
+        raise not_found("Basket item not found")
+    session = session_service.get_session(db, item.session_id)
+    get_membership(db, session.family_id, user.id)
+    return session_service.update_session_item(db, session_item_id, data.quantity)
 
 
 @router.get("/api/shopping-sessions/{session_id}", response_model=ShoppingSessionOut)

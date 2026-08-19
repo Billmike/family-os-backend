@@ -367,3 +367,95 @@ def get_session(db: Session, session_id: UUID) -> ShoppingSession:
 
 def get_session_out(db: Session, session_id: UUID) -> ShoppingSessionOut:
     return _session_to_out(get_session(db, session_id))
+
+
+def reorder_session(
+    db: Session,
+    family_id: UUID,
+    source_session_id: UUID,
+    user: User,
+) -> ShoppingSessionOut:
+    source = get_session(db, source_session_id)
+    if source.family_id != family_id:
+        raise not_found("Shopping session not found")
+    if source.status != SESSION_STATUS_COMPLETED:
+        raise bad_request("Only completed sessions can be reordered")
+
+    existing = _load_active_session(db, family_id)
+    if existing is not None:
+        if existing.items:
+            raise conflict("An active shopping session already exists")
+        db.delete(existing)
+        db.flush()
+
+    now = datetime.now(timezone.utc)
+    new_session = ShoppingSession(
+        family_id=family_id,
+        status=SESSION_STATUS_ACTIVE,
+        started_at=now,
+        started_by=user.id,
+    )
+    db.add(new_session)
+    db.flush()
+
+    for src_item in source.items:
+        new_item = ShoppingSessionItem(
+            session_id=new_session.id,
+            name=src_item.name,
+            quantity=src_item.quantity,
+            unit=src_item.unit,
+            category=src_item.category,
+            location_id=src_item.location_id,
+            location_name=src_item.location_name,
+            added_at=now,
+            added_by=user.id,
+        )
+        db.add(new_item)
+
+    db.commit()
+    db.refresh(new_session)
+    new_session = _load_active_session(db, family_id)
+    if new_session is None:
+        raise not_found("Active shopping session not found")
+
+    session_out = _session_to_out(new_session)
+    hub.broadcast(
+        family_id,
+        {
+            "type": "shopping.session.started",
+            "session": session_out.model_dump(mode="json"),
+        },
+    )
+    return session_out
+
+
+def update_session_item(
+    db: Session,
+    session_item_id: UUID,
+    quantity: "Decimal",
+) -> ShoppingSessionItemOut:
+    from decimal import Decimal as _Decimal
+
+    session_item = db.get(ShoppingSessionItem, session_item_id)
+    if session_item is None:
+        raise not_found("Basket item not found")
+
+    session = db.get(ShoppingSession, session_item.session_id)
+    if session is None or session.status != SESSION_STATUS_ACTIVE:
+        raise bad_request("Can only edit items in an active session")
+
+    session_item.quantity = quantity
+    session.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(session_item)
+
+    item_out = _session_item_to_out(session_item)
+    hub.broadcast(
+        session.family_id,
+        {
+            "type": "shopping.session.item.updated",
+            "session_id": str(session.id),
+            "item": item_out.model_dump(mode="json"),
+        },
+    )
+    return item_out
