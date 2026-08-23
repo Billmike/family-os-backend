@@ -30,6 +30,7 @@ from app.schemas.shopping_session import (
     ShoppingSessionOut,
     ShoppingSpendOut,
 )
+from app.services import budget as budget_service
 from app.services import expense as expense_service
 from app.services import notifications as notification_service
 from app.services import shopping as shopping_service
@@ -296,6 +297,7 @@ def complete_session(
         entity_id=session.id,
         background_tasks=background_tasks,
     )
+    budget_service.safe_evaluate_budget_alerts(db, family_id, actor_user_id=user.id)
     return session_out
 
 

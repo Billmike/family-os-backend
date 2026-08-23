@@ -40,6 +40,7 @@ class NotificationPreference(Base):
     task_due_soon: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     shopping_activity: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     family_activity: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    budget_alerts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     quiet_hours_start: Mapped[str | None] = mapped_column(String, nullable=True)
     quiet_hours_end: Mapped[str | None] = mapped_column(String, nullable=True)
 

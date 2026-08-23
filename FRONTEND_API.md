@@ -950,6 +950,111 @@ Monthly household spend for Expenses. Totals come from the expense ledger (all c
 
 `average` is `0.00` when `entry_count` is 0. `year_to_date_total` is the sum of all expenses in the current calendar year (family timezone). Category rows are omitted when a month has no spend.
 
+When a household budget exists for the current month, the response includes:
+
+```json
+"budget": {
+  "amount": "600.00",
+  "used": "480.00",
+  "remaining": "120.00",
+  "percent_used": 80,
+  "state": "warning"
+}
+```
+
+`state` is `ok` below 80% used, `warning` at 80–99%, and `over` at 100% or above. Omitted when no household budget is set for the current month.
+
+---
+
+## Budgets
+
+Monthly spend limits for the household total and/or individual expense categories. Parents and owners can create, update, and delete budgets; children can read them.
+
+Budget months are keyed to `YYYY-MM` in the family timezone. `POST` upsert always applies to the **current** month.
+
+### `GET /api/families/{family_id}/budgets`
+
+Auth + family membership.
+
+**Query:** `month` (optional `YYYY-MM`; defaults to current month in the family timezone)
+
+**Response `200`**
+
+```json
+{
+  "month": "2026-08",
+  "currency": "EUR",
+  "overall": {
+    "id": "...",
+    "family_id": "...",
+    "category": null,
+    "amount": "600.00",
+    "currency": "EUR",
+    "month": "2026-08",
+    "used": "480.00",
+    "remaining": "120.00",
+    "percent_used": 80,
+    "state": "warning",
+    "created_at": "...",
+    "updated_at": "..."
+  },
+  "categories": [
+    {
+      "id": "...",
+      "family_id": "...",
+      "category": "Shopping",
+      "amount": "100.00",
+      "currency": "EUR",
+      "month": "2026-08",
+      "used": "85.00",
+      "remaining": "15.00",
+      "percent_used": 85,
+      "state": "warning",
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+`overall` is `null` when no household budget exists. `categories` lists only category budgets that have been set (not all eight categories).
+
+### `POST /api/families/{family_id}/budgets`
+
+Auth + parent or owner. Upsert by `(family_id, month, category)` — creates a row or updates the amount if one already exists.
+
+**Request**
+
+```json
+{
+  "category": "Shopping",
+  "amount": "100.00",
+  "currency": "EUR"
+}
+```
+
+Omit `category` or set it to `null` for the household total. `currency` defaults to `EUR`.
+
+**Response `201`** — new `BudgetOut`. **Response `200`** — updated existing row. Broadcasts `budget.updated`.
+
+### `PATCH /api/budgets/{budget_id}`
+
+Auth + parent or owner for the budget’s family.
+
+**Request:** `{ "amount": "150.00" }`
+
+**Response `200`** — `BudgetOut`. Broadcasts `budget.updated`.
+
+### `DELETE /api/budgets/{budget_id}`
+
+Auth + parent or owner.
+
+**Response `204`**. Broadcasts `{ "type": "budget.deleted", "budget_id": "..." }`.
+
+When spend crosses 80% or 100% of a budget in a month, members receive in-app and push notifications (if `budget_alerts` is enabled). Alerts fire at most once per threshold per budget per month.
+
+---
+
 ### `PATCH /api/expenses/{expense_id}`
 
 Update a **manual** or **receipt** expense. Shopping-sourced rows return `400`.
@@ -1148,6 +1253,7 @@ Auth required (current user’s notifications).
   "task_due_soon": true,
   "shopping_activity": true,
   "family_activity": true,
+  "budget_alerts": true,
   "quiet_hours_start": null,
   "quiet_hours_end": null
 }
@@ -1159,7 +1265,7 @@ Auth required (current user’s notifications).
 
 **Request** — any subset of the preference booleans / quiet hours strings.
 
-Quiet hours use `HH:MM` (24h, UTC). When both `quiet_hours_start` and `quiet_hours_end` are set, Web Push is skipped during that window; in-app notifications and WebSocket `notification.created` still fire. Overnight windows (e.g. `22:00`–`07:00`) are supported.
+Quiet hours use `HH:MM` (24h) in the **family timezone**. When both `quiet_hours_start` and `quiet_hours_end` are set, Web Push is skipped during that window; in-app notifications and WebSocket `notification.created` still fire. Overnight windows (e.g. `22:00`–`07:00`) are supported.
 
 **Response `200`** — full preferences object.
 
@@ -1298,6 +1404,18 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 
 ```json
 { "type": "expense.deleted", "expense_id": "..." }
+```
+
+**Budgets**
+
+```json
+{ "type": "budget.updated", "budget": { } }
+```
+
+`budget` matches `BudgetOut` from `GET /api/families/{family_id}/budgets`.
+
+```json
+{ "type": "budget.deleted", "budget_id": "..." }
 ```
 
 **Receipts**
@@ -1466,6 +1584,10 @@ async function api<T>(
 | POST | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/spend` | Yes |
+| GET | `/api/families/{family_id}/budgets` | Yes |
+| POST | `/api/families/{family_id}/budgets` | Yes (Parent/Owner) |
+| PATCH | `/api/budgets/{budget_id}` | Yes (Parent/Owner) |
+| DELETE | `/api/budgets/{budget_id}` | Yes (Parent/Owner) |
 | PATCH | `/api/expenses/{expense_id}` | Yes |
 | DELETE | `/api/expenses/{expense_id}` | Yes |
 | POST | `/api/families/{family_id}/receipts` | Yes |

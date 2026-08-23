@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import auth, dashboard, events, expenses, families, notifications, receipts, shopping, shopping_sessions, tasks, ws
+from app.api import auth, budgets, dashboard, events, expenses, families, notifications, receipts, shopping, shopping_sessions, tasks, ws
 from app.core.config import get_settings
 from app.core.exceptions import error_body
 from app.realtime.hub import hub
@@ -71,6 +71,7 @@ app.include_router(tasks.router)
 app.include_router(shopping.router)
 app.include_router(shopping_sessions.router)
 app.include_router(expenses.router)
+app.include_router(budgets.router)
 app.include_router(receipts.router)
 app.include_router(notifications.router)
 app.include_router(ws.router)

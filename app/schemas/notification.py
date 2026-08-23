@@ -41,6 +41,7 @@ class NotificationPreferencesOut(ORMModel):
     task_due_soon: bool
     shopping_activity: bool
     family_activity: bool
+    budget_alerts: bool
     quiet_hours_start: str | None
     quiet_hours_end: str | None
 
@@ -51,6 +52,7 @@ class NotificationPreferencesUpdate(BaseModel):
     task_due_soon: bool | None = None
     shopping_activity: bool | None = None
     family_activity: bool | None = None
+    budget_alerts: bool | None = None
     quiet_hours_start: str | None = None
     quiet_hours_end: str | None = None
 

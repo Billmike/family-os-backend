@@ -55,7 +55,9 @@ def require_family_member(
     return get_membership(db, family_id, user.id)
 
 
-def require_parent_or_owner(member: FamilyMember) -> FamilyMember:
+def require_parent_or_owner(
+    member: FamilyMember = Depends(require_family_member),
+) -> FamilyMember:
     if member.role not in (FamilyRole.OWNER, FamilyRole.PARENT):
         raise forbidden("Parent or Owner role required")
     return member

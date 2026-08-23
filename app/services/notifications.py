@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError, bad_request, not_found
-from app.models.family import FamilyMember
+from app.core.timeutil import family_zone
+from app.models.family import Family, FamilyMember
 from app.models.notification import Notification, NotificationPreference, PushSubscription
 from app.models.task import Task
 from app.models.user import User, utcnow
@@ -90,9 +91,11 @@ def _parse_quiet_hhmm(value: str) -> int | None:
 
 def is_in_quiet_hours(
     prefs: NotificationPreference,
+    *,
+    tz_name: str,
     now: datetime | None = None,
 ) -> bool:
-    """Return True when ``now`` (UTC) falls inside configured quiet hours.
+    """Return True when ``now`` falls inside configured quiet hours in ``tz_name``.
 
     Supports overnight windows (e.g. 22:00–07:00). Both start and end must be
     valid ``HH:MM`` strings; otherwise quiet hours are treated as unset.
@@ -103,11 +106,16 @@ def is_in_quiet_hours(
     end = _parse_quiet_hhmm(prefs.quiet_hours_end)
     if start is None or end is None or start == end:
         return False
-    current = now or datetime.now(timezone.utc)
+    current = (now or datetime.now(timezone.utc)).astimezone(family_zone(tz_name))
     minutes = current.hour * 60 + current.minute
     if start < end:
         return start <= minutes < end
     return minutes >= start or minutes < end
+
+
+def _resolve_family_timezone(db: Session, family_id: UUID) -> str:
+    family = db.get(Family, family_id)
+    return family.timezone if family is not None else "UTC"
 
 
 def ensure_preferences(db: Session, user_id: UUID) -> NotificationPreference:
@@ -125,6 +133,7 @@ _PUSH_URL_BY_TYPE = {
     "task": "/?go=tasks",
     "shopping": "/?go=shopping",
     "family": "/?go=notifications",
+    "budget": "/expenses",
 }
 
 
@@ -248,6 +257,7 @@ def create_notification(
     entity_id: UUID | None = None,
     push: bool = True,
     background_tasks: BackgroundTasks | None = None,
+    family_timezone: str | None = None,
 ) -> Notification:
     notif = Notification(
         family_id=family_id,
@@ -285,7 +295,8 @@ def create_notification(
         # unreliable on request-billed hosts (CPU throttled once the response leaves).
         _ = background_tasks
         prefs = ensure_preferences(db, user_id)
-        if is_in_quiet_hours(prefs):
+        tz_name = family_timezone or _resolve_family_timezone(db, family_id)
+        if is_in_quiet_hours(prefs, tz_name=tz_name):
             logger.info("Skipping push for user %s during quiet hours", user_id)
         else:
             send_push_to_user(db, user_id, payload)
@@ -304,16 +315,17 @@ def notify_family_members(
     entity_type: str | None = None,
     entity_id: UUID | None = None,
     background_tasks: BackgroundTasks | None = None,
+    include_actor: bool = False,
+    family_timezone: str | None = None,
 ) -> None:
-    members = (
-        db.query(FamilyMember)
-        .filter(
-            FamilyMember.family_id == family_id,
-            FamilyMember.user_id.isnot(None),
-            FamilyMember.user_id != actor_user_id,
-        )
-        .all()
+    tz_name = family_timezone or _resolve_family_timezone(db, family_id)
+    query = db.query(FamilyMember).filter(
+        FamilyMember.family_id == family_id,
+        FamilyMember.user_id.isnot(None),
     )
+    if not include_actor:
+        query = query.filter(FamilyMember.user_id != actor_user_id)
+    members = query.all()
     for member in members:
         assert member.user_id is not None
         prefs = ensure_preferences(db, member.user_id)
@@ -329,6 +341,7 @@ def notify_family_members(
             entity_type=entity_type,
             entity_id=entity_id,
             background_tasks=background_tasks,
+            family_timezone=tz_name,
         )
 
 
@@ -340,6 +353,7 @@ def notify_task_assigned(
     previous_assignee_ids: set[UUID] | None = None,
 ) -> None:
     previous = previous_assignee_ids or set()
+    family_timezone = _resolve_family_timezone(db, task.family_id)
     for assignee in task.assignees:
         if assignee.family_member_id in previous:
             continue
@@ -359,6 +373,7 @@ def notify_task_assigned(
             entity_type="task",
             entity_id=task.id,
             background_tasks=background_tasks,
+            family_timezone=family_timezone,
         )
 
 

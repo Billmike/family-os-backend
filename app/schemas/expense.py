@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.models.expense import EXPENSE_CATEGORIES
 from app.schemas.auth import ORMModel
+from app.schemas.budget import BudgetSummaryOut
 
 ExpenseCategory = Literal[
     "Shopping",
@@ -98,6 +99,7 @@ class HouseholdSpendOut(BaseModel):
     current_month: str
     year_to_date_total: Decimal
     months: list[MonthlyHouseholdSpendOut]
+    budget: BudgetSummaryOut | None = None
 
 
 assert set(EXPENSE_CATEGORIES) == {

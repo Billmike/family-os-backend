@@ -23,6 +23,7 @@ from app.models.user import User
 from app.realtime.hub import hub
 from app.schemas.expense import ExpenseOut
 from app.schemas.receipt import ReceiptConfirm, ReceiptItemOut, ReceiptOut
+from app.services import budget as budget_service
 from app.services import expense as expense_service
 from app.services import receipt_extraction
 from app.services import receipt_storage
@@ -342,6 +343,7 @@ def confirm_receipt(
             source_item_count=item_count,
         )
         _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
+        budget_service.safe_evaluate_budget_alerts(db, receipt.family_id, actor_user_id=user.id)
         return out
 
     expense = Expense(
@@ -380,6 +382,7 @@ def confirm_receipt(
         source_item_count=out.source_item_count,
     )
     _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
+    budget_service.safe_evaluate_budget_alerts(db, receipt.family_id, actor_user_id=user.id)
     return out
 
 

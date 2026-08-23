@@ -324,9 +324,21 @@ def test_is_in_quiet_hours_overnight() -> None:
         quiet_hours_start="22:00",
         quiet_hours_end="07:00",
     )
-    assert is_in_quiet_hours(prefs, datetime(2026, 8, 16, 23, 0, tzinfo=timezone.utc))
-    assert is_in_quiet_hours(prefs, datetime(2026, 8, 16, 6, 30, tzinfo=timezone.utc))
-    assert not is_in_quiet_hours(prefs, datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc))
+    assert is_in_quiet_hours(
+        prefs,
+        tz_name="UTC",
+        now=datetime(2026, 8, 16, 23, 0, tzinfo=timezone.utc),
+    )
+    assert is_in_quiet_hours(
+        prefs,
+        tz_name="UTC",
+        now=datetime(2026, 8, 16, 6, 30, tzinfo=timezone.utc),
+    )
+    assert not is_in_quiet_hours(
+        prefs,
+        tz_name="UTC",
+        now=datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc),
+    )
 
 
 def test_is_in_quiet_hours_daytime_window() -> None:
@@ -335,5 +347,33 @@ def test_is_in_quiet_hours_daytime_window() -> None:
         quiet_hours_start="09:00",
         quiet_hours_end="17:00",
     )
-    assert is_in_quiet_hours(prefs, datetime(2026, 8, 16, 10, 0, tzinfo=timezone.utc))
-    assert not is_in_quiet_hours(prefs, datetime(2026, 8, 16, 8, 0, tzinfo=timezone.utc))
+    assert is_in_quiet_hours(
+        prefs,
+        tz_name="UTC",
+        now=datetime(2026, 8, 16, 10, 0, tzinfo=timezone.utc),
+    )
+    assert not is_in_quiet_hours(
+        prefs,
+        tz_name="UTC",
+        now=datetime(2026, 8, 16, 8, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_is_in_quiet_hours_uses_family_timezone() -> None:
+    prefs = NotificationPreference(
+        user_id=uuid4(),
+        quiet_hours_start="22:00",
+        quiet_hours_end="07:00",
+    )
+    # 21:00 UTC = 23:00 Europe/Berlin (CEST, UTC+2) — inside quiet hours locally
+    assert is_in_quiet_hours(
+        prefs,
+        tz_name="Europe/Berlin",
+        now=datetime(2026, 8, 16, 21, 0, tzinfo=timezone.utc),
+    )
+    # 07:00 UTC = 09:00 Europe/Berlin — outside quiet hours locally
+    assert not is_in_quiet_hours(
+        prefs,
+        tz_name="Europe/Berlin",
+        now=datetime(2026, 8, 16, 7, 0, tzinfo=timezone.utc),
+    )

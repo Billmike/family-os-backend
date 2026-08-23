@@ -62,6 +62,7 @@ def process_reminders() -> None:
                     body=event.title,
                     entity_type="event",
                     entity_id=event.id,
+                    family_timezone=family.timezone,
                 )
             reminder.last_fired_at = now
             db.commit()
@@ -79,6 +80,9 @@ def process_reminders() -> None:
             .all()
         )
         for task in due_soon:
+            family = db.get(Family, task.family_id)
+            if family is None:
+                continue
             for assignee in task.assignees:
                 member = db.get(FamilyMember, assignee.family_member_id)
                 if member is None or member.user_id is None:
@@ -96,6 +100,7 @@ def process_reminders() -> None:
                     entity_type="task",
                     entity_id=task.id,
                     push=True,
+                    family_timezone=family.timezone,
                 )
             # One delivery attempt per due window (matches EventReminder.last_fired_at).
             task.last_due_soon_notified_at = now

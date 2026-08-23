@@ -1,10 +1,12 @@
 from collections import defaultdict
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+
+from app.core.money import as_money
 
 from app.core.exceptions import bad_request, not_found
 from app.core.timeutil import (
@@ -15,6 +17,7 @@ from app.core.timeutil import (
     month_key,
     parse_year_month,
 )
+from app.services import budget as budget_service
 from app.models.expense import (
     CATEGORY_SHOPPING,
     SOURCE_MANUAL,
@@ -41,8 +44,7 @@ _ZERO = Decimal("0.00")
 
 
 def _as_money(value: Decimal | None) -> Decimal:
-    amount = Decimal(str(value)) if value is not None else _ZERO
-    return amount.quantize(_MONEY, rounding=ROUND_HALF_UP)
+    return as_money(value)
 
 
 def _source_item_counts(db: Session, expenses: list[Expense]) -> dict[UUID, int]:
@@ -177,6 +179,7 @@ def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate)
     db.refresh(expense)
     out = expense_to_out(expense, source_item_count=None)
     _broadcast(family.id, "expense.created", expense, source_item_count=None)
+    budget_service.safe_evaluate_budget_alerts(db, family.id, actor_user_id=user.id)
     return out
 
 
@@ -231,6 +234,8 @@ def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> Expens
     count = counts.get(expense.source_id) if expense.source_id else None
     out = expense_to_out(expense, source_item_count=count)
     _broadcast(expense.family_id, "expense.updated", expense, source_item_count=count)
+    budget_service.safe_recover_budget_alerts(db, expense.family_id)
+    budget_service.safe_evaluate_budget_alerts(db, expense.family_id, actor_user_id=expense.created_by)
     return out
 
 
@@ -248,6 +253,7 @@ def delete_expense(db: Session, expense: Expense) -> None:
         family_id,
         {"type": "expense.deleted", "expense_id": str(expense_id)},
     )
+    budget_service.safe_recover_budget_alerts(db, family_id)
 
 
 def get_spend(
@@ -331,4 +337,5 @@ def get_spend(
         current_month=current_month,
         year_to_date_total=_as_money(year_to_date),
         months=month_rows,
+        budget=budget_service.overall_budget_summary(db, family, month=current_month),
     )
