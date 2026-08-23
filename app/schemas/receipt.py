@@ -53,6 +53,7 @@ class ReceiptOut(ORMModel):
     model_name: str | None
     error_message: str | None
     expense_id: UUID | None
+    shopping_session_id: UUID | None
     items: list[ReceiptItemOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

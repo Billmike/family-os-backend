@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import bad_request, not_found, service_unavailable
-from app.models.expense import SOURCE_RECEIPT, Expense
+from app.models.expense import CATEGORY_SHOPPING, SOURCE_RECEIPT, Expense
 from app.models.family import Family
 from app.models.receipt import (
     STATUS_CONFIRMED,
@@ -26,6 +26,7 @@ from app.schemas.receipt import ReceiptConfirm, ReceiptItemOut, ReceiptOut
 from app.services import expense as expense_service
 from app.services import receipt_extraction
 from app.services import receipt_storage
+from app.services import shopping_session as shopping_session_service
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ def receipt_to_out(receipt: Receipt) -> ReceiptOut:
         model_name=receipt.model_name,
         error_message=receipt.error_message,
         expense_id=receipt.expense_id,
+        shopping_session_id=receipt.shopping_session_id,
         items=[
             ReceiptItemOut(
                 id=item.id,
@@ -122,9 +124,14 @@ def list_receipts(
 
 
 def get_receipt_for_expense(db: Session, expense: Expense) -> ReceiptOut:
-    if expense.source_type != SOURCE_RECEIPT or expense.source_id is None:
+    receipt = (
+        db.query(Receipt)
+        .options(joinedload(Receipt.items))
+        .filter(Receipt.expense_id == expense.id)
+        .first()
+    )
+    if receipt is None:
         raise not_found("No receipt linked to this expense")
-    receipt = get_receipt(db, expense.source_id)
     return receipt_to_out(receipt)
 
 
@@ -286,6 +293,57 @@ def confirm_receipt(
         )
 
     occurred_at = data.occurred_at or receipt.purchased_at or datetime.now(timezone.utc)
+
+    if data.category == CATEGORY_SHOPPING:
+        db.flush()
+        db.refresh(receipt)
+        receipt = get_receipt(db, receipt.id)
+
+        session = shopping_session_service.create_completed_session_from_receipt(
+            db,
+            receipt=receipt,
+            user=user,
+            data=data,
+            items=list(receipt.items),
+            occurred_at=occurred_at,
+        )
+        receipt.shopping_session_id = session.id
+        expense = expense_service.record_shopping_session_expense(db, session=session, user=user)
+        expense.merchant = data.merchant or receipt.merchant
+        expense.note = data.note
+        db.flush()
+
+        receipt.status = STATUS_CONFIRMED
+        receipt.expense_id = expense.id
+        receipt.merchant = data.merchant or receipt.merchant
+        receipt.total = data.total
+        receipt.currency = data.currency
+        receipt.purchased_at = occurred_at
+        receipt.suggested_category = data.category
+        receipt.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(expense)
+        db.refresh(session)
+
+        session_out = shopping_session_service._session_to_out(session)
+        item_count = session_out.item_count
+        out = expense_service.expense_to_out(expense, source_item_count=item_count)
+        hub.broadcast(
+            receipt.family_id,
+            {
+                "type": "shopping.session.completed",
+                "session": session_out.model_dump(mode="json"),
+            },
+        )
+        expense_service._broadcast(
+            receipt.family_id,
+            "expense.created",
+            expense,
+            source_item_count=item_count,
+        )
+        _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
+        return out
+
     expense = Expense(
         family_id=receipt.family_id,
         amount=data.total,

@@ -1024,9 +1024,13 @@ Create (or return existing) expense from a ready/failed receipt. Edits are submi
 }
 ```
 
-**Response `200`** — `ExpenseOut` with `source_type: "receipt"`, `source_id` = receipt id. Broadcasts `expense.created`. Idempotent if already confirmed.
+**Response `200`** — `ExpenseOut`. Idempotent if already confirmed. Broadcasts `expense.created`.
 
-**Response `400`** — still processing (`code: receipt_not_ready`) or invalid state.
+When **`category` is `Shopping`**: also creates a completed **shopping session** from included line items. The expense uses `source_type: "shopping_session"` and `source_id` = session id (same as completing a basket trip). The receipt row is linked via `expense_id` and `shopping_session_id`. Broadcasts `shopping.session.completed` and `expense.created`. Requires at least one included item. Merchant and note from the confirm payload are stored on the expense.
+
+When **category is anything else**: expense uses `source_type: "receipt"` and `source_id` = receipt id (unchanged).
+
+**Response `400`** — still processing (`code: receipt_not_ready`), invalid state, or Shopping confirm with no included items.
 
 ### `DELETE /api/receipts/{receipt_id}`
 
@@ -1036,7 +1040,7 @@ Discard a draft (not yet confirmed). Deletes the stored image.
 
 ### `GET /api/expenses/{expense_id}/receipt`
 
-**Response `200`** — `ReceiptOut` for a receipt-sourced expense.
+**Response `200`** — `ReceiptOut` linked via `receipt.expense_id` (works for both `receipt`- and `shopping_session`-sourced expenses created from a receipt).
 
 ### `ReceiptOut` shape
 
@@ -1061,6 +1065,7 @@ Discard a draft (not yet confirmed). Deletes the stored image.
   "model_name": "gpt-4o-mini",
   "error_message": null,
   "expense_id": null,
+  "shopping_session_id": null,
   "items": [
     {
       "id": "...",

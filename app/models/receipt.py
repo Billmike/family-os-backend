@@ -59,6 +59,9 @@ class Receipt(Base, TimestampMixin):
     expense_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("expenses.id", ondelete="SET NULL"), nullable=True
     )
+    shopping_session_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("shopping_sessions.id", ondelete="SET NULL"), nullable=True
+    )
 
     items: Mapped[list["ReceiptItem"]] = relationship(
         "ReceiptItem",

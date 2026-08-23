@@ -329,11 +329,22 @@ def test_upload_extracts_and_confirm(client: TestClient, receipt_env: Path) -> N
     )
     assert confirm.status_code == 200, confirm.text
     expense = confirm.json()
-    assert expense["source_type"] == "receipt"
-    assert expense["source_id"] == receipt_id
+    assert expense["source_type"] == "shopping_session"
+    assert expense["source_id"] is not None
+    assert expense["source_id"] != receipt_id
     assert float(expense["amount"]) == 52.10
     assert expense["source_item_count"] == 3
     assert expense["category"] == "Shopping"
+    assert expense["merchant"] == "REWE"
+    assert expense["note"] == "Weekly shop"
+
+    sessions = client.get(f"/api/families/{family_id}/shopping-sessions", headers=headers)
+    assert sessions.status_code == 200
+    assert len(sessions.json()) >= 1
+    trip = sessions.json()[0]
+    assert trip["item_count"] == 3
+    assert float(trip["total_cost"]) == 52.10
+    assert str(trip["id"]) == expense["source_id"]
 
     again = client.post(
         f"/api/receipts/{receipt_id}/confirm",
@@ -354,12 +365,59 @@ def test_upload_extracts_and_confirm(client: TestClient, receipt_env: Path) -> N
         headers=headers,
         json={"note": "Updated note"},
     )
-    assert patch.status_code == 200
-    assert patch.json()["note"] == "Updated note"
+    assert patch.status_code == 400
 
     linked = client.get(f"/api/expenses/{expense['id']}/receipt", headers=headers)
     assert linked.status_code == 200
     assert linked.json()["id"] == receipt_id
+    assert linked.json()["shopping_session_id"] == expense["source_id"]
+
+
+def test_confirm_non_shopping_receipt_stays_receipt_source(
+    client: TestClient,
+    receipt_env: Path,
+) -> None:
+    headers = auth_headers(client, "receipt-transport@example.com")
+    family_id = _create_family(client, headers)
+    upload = _upload(client, headers, family_id)
+    receipt_id = upload.json()["id"]
+    polled = client.get(f"/api/receipts/{receipt_id}", headers=headers).json()
+
+    confirm = client.post(
+        f"/api/receipts/{receipt_id}/confirm",
+        headers=headers,
+        json={
+            "category": "Transportation",
+            "merchant": "REWE",
+            "total": "52.10",
+            "currency": "EUR",
+            "occurred_at": "2026-08-22T14:36:56Z",
+            "items": [
+                {
+                    "name": item["name"],
+                    "quantity": item["quantity"],
+                    "unit": item["unit"],
+                    "unit_price": item["unit_price"],
+                    "total_price": item["total_price"],
+                    "tax_code": item["tax_code"],
+                    "is_included": True,
+                }
+                for item in polled["items"]
+            ],
+        },
+    )
+    assert confirm.status_code == 200, confirm.text
+    expense = confirm.json()
+    assert expense["source_type"] == "receipt"
+    assert expense["source_id"] == receipt_id
+    assert expense["category"] == "Transportation"
+
+    linked = client.get(f"/api/receipts/{receipt_id}", headers=headers).json()
+    assert linked["shopping_session_id"] is None
+
+    sessions = client.get(f"/api/families/{family_id}/shopping-sessions", headers=headers)
+    assert sessions.status_code == 200
+    assert sessions.json() == []
 
 
 def test_extraction_failure(client: TestClient, receipt_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:

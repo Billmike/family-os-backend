@@ -9,6 +9,7 @@ from app.core.exceptions import bad_request, conflict, not_found
 from app.core.timeutil import month_key, parse_year_month
 from app.models.expense import CATEGORY_SHOPPING
 from app.models.family import Family
+from app.models.receipt import Receipt, ReceiptItem
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
 from app.models.shopping_session import (
     SESSION_STATUS_ACTIVE,
@@ -18,6 +19,7 @@ from app.models.shopping_session import (
 )
 from app.models.user import User
 from app.realtime.hub import hub
+from app.schemas.receipt import ReceiptConfirm
 from app.schemas.shopping import ShoppingItemOut, ShoppingListCreate
 from app.schemas.shopping_session import (
     AddToBasketResponse,
@@ -459,3 +461,49 @@ def update_session_item(
         },
     )
     return item_out
+
+
+def create_completed_session_from_receipt(
+    db: Session,
+    *,
+    receipt: Receipt,
+    user: User,
+    data: ReceiptConfirm,
+    items: list[ReceiptItem],
+    occurred_at: datetime,
+) -> ShoppingSession:
+    """Create a completed shopping session from confirmed receipt line items."""
+    included = [item for item in items if item.is_included and item.name.strip()]
+    if not included:
+        raise bad_request("Shopping receipts need at least one included item")
+
+    session = ShoppingSession(
+        family_id=receipt.family_id,
+        status=SESSION_STATUS_COMPLETED,
+        started_at=occurred_at,
+        started_by=user.id,
+        completed_at=occurred_at,
+        completed_by=user.id,
+        total_cost=data.total,
+        currency=data.currency,
+    )
+    db.add(session)
+    db.flush()
+
+    for item in included:
+        db.add(
+            ShoppingSessionItem(
+                session_id=session.id,
+                name=item.name[:200],
+                quantity=item.quantity,
+                unit=item.unit,
+                category=CATEGORY_SHOPPING,
+                location_id=None,
+                location_name=None,
+                added_at=occurred_at,
+                added_by=user.id,
+            )
+        )
+    db.flush()
+    db.refresh(session)
+    return session
