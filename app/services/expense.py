@@ -179,7 +179,9 @@ def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate)
     db.refresh(expense)
     out = expense_to_out(expense, source_item_count=None)
     _broadcast(family.id, "expense.created", expense, source_item_count=None)
-    budget_service.safe_evaluate_budget_alerts(db, family.id, actor_user_id=user.id)
+    budget_service.safe_evaluate_budget_alerts(
+        db, family.id, actor_user_id=user.id, occurred_at=expense.occurred_at
+    )
     return out
 
 
@@ -234,8 +236,10 @@ def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> Expens
     count = counts.get(expense.source_id) if expense.source_id else None
     out = expense_to_out(expense, source_item_count=count)
     _broadcast(expense.family_id, "expense.updated", expense, source_item_count=count)
-    budget_service.safe_recover_budget_alerts(db, expense.family_id)
-    budget_service.safe_evaluate_budget_alerts(db, expense.family_id, actor_user_id=expense.created_by)
+    budget_service.safe_recover_budget_alerts(db, expense.family_id, occurred_at=expense.occurred_at)
+    budget_service.safe_evaluate_budget_alerts(
+        db, expense.family_id, actor_user_id=expense.created_by, occurred_at=expense.occurred_at
+    )
     return out
 
 
@@ -243,6 +247,7 @@ def delete_expense(db: Session, expense: Expense) -> None:
     _require_editable(expense)
     expense_id = expense.id
     family_id = expense.family_id
+    occurred_at = expense.occurred_at
     if expense.source_type == SOURCE_RECEIPT:
         from app.services import receipt as receipt_service
 
@@ -253,7 +258,7 @@ def delete_expense(db: Session, expense: Expense) -> None:
         family_id,
         {"type": "expense.deleted", "expense_id": str(expense_id)},
     )
-    budget_service.safe_recover_budget_alerts(db, family_id)
+    budget_service.safe_recover_budget_alerts(db, family_id, occurred_at=occurred_at)
 
 
 def get_spend(
@@ -337,5 +342,5 @@ def get_spend(
         current_month=current_month,
         year_to_date_total=_as_money(year_to_date),
         months=month_rows,
-        budget=budget_service.overall_budget_summary(db, family, month=current_month),
+        budget=budget_service.overall_budget_summary(db, family),
     )

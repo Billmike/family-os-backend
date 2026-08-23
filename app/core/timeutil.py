@@ -1,9 +1,21 @@
 import re
 from calendar import monthrange
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 YEAR_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def period_bounds(tz_name: str, start_date: date, end_date: date) -> tuple[datetime, datetime]:
+    """Half-open [start midnight, day-after-end midnight) in the family timezone."""
+    tz = family_zone(tz_name)
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+    end_exclusive = datetime(end_date.year, end_date.month, end_date.day, tzinfo=tz) + timedelta(days=1)
+    return start, end_exclusive
+
+
+def family_today(tz_name: str) -> date:
+    return family_now(tz_name).date()
 
 
 def ensure_aware(dt: datetime) -> datetime:

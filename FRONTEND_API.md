@@ -950,10 +950,14 @@ Monthly household spend for Expenses. Totals come from the expense ledger (all c
 
 `average` is `0.00` when `entry_count` is 0. `year_to_date_total` is the sum of all expenses in the current calendar year (family timezone). Category rows are omitted when a month has no spend.
 
-When a household budget exists for the current month, the response includes:
+When a household budget exists for the **current pay cycle**, the response includes:
 
 ```json
 "budget": {
+  "period_id": "...",
+  "label_month": "2026-09",
+  "start_date": "2026-08-27",
+  "end_date": "2026-09-26",
   "amount": "600.00",
   "used": "480.00",
   "remaining": "120.00",
@@ -962,96 +966,91 @@ When a household budget exists for the current month, the response includes:
 }
 ```
 
-`state` is `ok` below 80% used, `warning` at 80–99%, and `over` at 100% or above. Omitted when no household budget is set for the current month.
+`state` is `ok` below 80% used, `warning` at 80–99%, and `over` at 100% or above. `null` when no period covers today or the current period has no household (overall) limit. Calendar month totals in `months` are unchanged — budget usage is summed over the cycle window, not the calendar month.
 
 ---
 
 ## Budgets
 
-Monthly spend limits for the household total and/or individual expense categories. Parents and owners can create, update, and delete budgets; children can read them.
+Dated **pay-cycle periods** with per-cycle amounts for the household total and/or individual expense categories. Parents and owners write; all members read.
 
-Budget months are keyed to `YYYY-MM` in the family timezone. `POST` upsert always applies to the **current** month.
+A period has explicit `start_date` / `end_date` (inclusive, family-local dates). `label_month` is the destination month (`YYYY-MM`), defaulting to the month of `end_date` (e.g. 27 Aug–26 Sep → `2026-09`). Periods for a family must not overlap. Expenses still appear in calendar-month spend; they count toward a cycle when `occurred_at` falls in the period window.
 
-### `GET /api/families/{family_id}/budgets`
+### `GET /api/families/{family_id}/budget-periods/current`
 
-Auth + family membership.
+Auth + membership. Current cycle covering today in the family timezone, with nested budgets and usage.
 
-**Query:** `month` (optional `YYYY-MM`; defaults to current month in the family timezone)
-
-**Response `200`**
+**Response `200`** — `BudgetPeriodOut` or `null`.
 
 ```json
 {
-  "month": "2026-08",
+  "id": "...",
+  "family_id": "...",
+  "start_date": "2026-08-27",
+  "end_date": "2026-09-26",
+  "label_month": "2026-09",
   "currency": "EUR",
-  "overall": {
-    "id": "...",
-    "family_id": "...",
-    "category": null,
-    "amount": "600.00",
-    "currency": "EUR",
-    "month": "2026-08",
-    "used": "480.00",
-    "remaining": "120.00",
-    "percent_used": 80,
-    "state": "warning",
-    "created_at": "...",
-    "updated_at": "..."
-  },
-  "categories": [
-    {
-      "id": "...",
-      "family_id": "...",
-      "category": "Shopping",
-      "amount": "100.00",
-      "currency": "EUR",
-      "month": "2026-08",
-      "used": "85.00",
-      "remaining": "15.00",
-      "percent_used": 85,
-      "state": "warning",
-      "created_at": "...",
-      "updated_at": "..."
-    }
-  ]
+  "overall": { },
+  "categories": [ ],
+  "created_at": "...",
+  "updated_at": "..."
 }
 ```
 
-`overall` is `null` when no household budget exists. `categories` lists only category budgets that have been set (not all eight categories).
+`overall` / `categories` rows include `used`, `remaining`, `percent_used`, `state`.
 
-### `POST /api/families/{family_id}/budgets`
+### `GET /api/families/{family_id}/budget-periods`
 
-Auth + parent or owner. Upsert by `(family_id, month, category)` — creates a row or updates the amount if one already exists.
+**Query:** `include` — comma list of `current`, `past`, `upcoming` (default `current,past`).
+
+**Response `200`:** `{ "periods": [ BudgetPeriodOut, ... ] }` newest start first.
+
+### `POST /api/families/{family_id}/budget-periods`
+
+Auth + parent or owner.
 
 **Request**
 
 ```json
 {
-  "category": "Shopping",
-  "amount": "100.00",
-  "currency": "EUR"
+  "start_date": "2026-08-27",
+  "end_date": "2026-09-26",
+  "label_month": "2026-09",
+  "currency": "EUR",
+  "budgets": [
+    { "category": null, "amount": "1500.00" },
+    { "category": "Shopping", "amount": "600.00" }
+  ]
 }
 ```
 
-Omit `category` or set it to `null` for the household total. `currency` defaults to `EUR`.
+`label_month` optional (defaults from `end_date`). Overlap with an existing period → `400`.
 
-**Response `201`** — new `BudgetOut`. **Response `200`** — updated existing row. Broadcasts `budget.updated`.
+**Response `201`** — `BudgetPeriodOut`. Broadcasts `budget.updated` with `{ period }`.
+
+### `PATCH /api/budget-periods/{period_id}`
+
+Auth + parent or owner. Any of `start_date`, `end_date`, `label_month`, `budgets` (full replace of limit rows when `budgets` is sent).
+
+**Response `200`** — `BudgetPeriodOut`. Broadcasts `budget.updated`.
+
+### `DELETE /api/budget-periods/{period_id}`
+
+**Response `204`**. Broadcasts `{ "type": "budget.deleted", "period_id": "..." }`.
 
 ### `PATCH /api/budgets/{budget_id}`
 
-Auth + parent or owner for the budget’s family.
+Update a single category/overall row amount.
 
 **Request:** `{ "amount": "150.00" }`
 
-**Response `200`** — `BudgetOut`. Broadcasts `budget.updated`.
+**Response `200`** — `BudgetOut`. Also broadcasts `budget.updated` with the full period.
 
 ### `DELETE /api/budgets/{budget_id}`
 
-Auth + parent or owner.
-
 **Response `204`**. Broadcasts `{ "type": "budget.deleted", "budget_id": "..." }`.
 
-When spend crosses 80% or 100% of a budget in a month, members receive in-app and push notifications (if `budget_alerts` is enabled). Alerts fire at most once per threshold per budget per month.
+When spend crosses 80% or 100% of a limit in a cycle, members receive notifications if `budget_alerts` is enabled. Alerts fire at most once per threshold per budget row per period.
 
 ---
 
@@ -1409,14 +1408,16 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 **Budgets**
 
 ```json
-{ "type": "budget.updated", "budget": { } }
+{ "type": "budget.updated", "period": { } }
 ```
 
-`budget` matches `BudgetOut` from `GET /api/families/{family_id}/budgets`.
+`period` matches `BudgetPeriodOut` from `GET /api/families/{family_id}/budget-periods/current`.
 
 ```json
-{ "type": "budget.deleted", "budget_id": "..." }
+{ "type": "budget.deleted", "period_id": "..." }
 ```
+
+or `{ "type": "budget.deleted", "budget_id": "..." }` when a single limit row is removed.
 
 **Receipts**
 
@@ -1584,8 +1585,11 @@ async function api<T>(
 | POST | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/spend` | Yes |
-| GET | `/api/families/{family_id}/budgets` | Yes |
-| POST | `/api/families/{family_id}/budgets` | Yes (Parent/Owner) |
+| GET | `/api/families/{family_id}/budget-periods/current` | Yes |
+| GET | `/api/families/{family_id}/budget-periods` | Yes |
+| POST | `/api/families/{family_id}/budget-periods` | Yes (Parent/Owner) |
+| PATCH | `/api/budget-periods/{period_id}` | Yes (Parent/Owner) |
+| DELETE | `/api/budget-periods/{period_id}` | Yes (Parent/Owner) |
 | PATCH | `/api/budgets/{budget_id}` | Yes (Parent/Owner) |
 | DELETE | `/api/budgets/{budget_id}` | Yes (Parent/Owner) |
 | PATCH | `/api/expenses/{expense_id}` | Yes |

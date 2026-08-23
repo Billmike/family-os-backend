@@ -343,7 +343,9 @@ def confirm_receipt(
             source_item_count=item_count,
         )
         _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
-        budget_service.safe_evaluate_budget_alerts(db, receipt.family_id, actor_user_id=user.id)
+        budget_service.safe_evaluate_budget_alerts(
+            db, receipt.family_id, actor_user_id=user.id, occurred_at=occurred_at
+        )
         return out
 
     expense = Expense(
@@ -382,7 +384,9 @@ def confirm_receipt(
         source_item_count=out.source_item_count,
     )
     _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
-    budget_service.safe_evaluate_budget_alerts(db, receipt.family_id, actor_user_id=user.id)
+    budget_service.safe_evaluate_budget_alerts(
+        db, receipt.family_id, actor_user_id=user.id, occurred_at=occurred_at
+    )
     return out
 
 

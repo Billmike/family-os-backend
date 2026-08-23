@@ -297,7 +297,9 @@ def complete_session(
         entity_id=session.id,
         background_tasks=background_tasks,
     )
-    budget_service.safe_evaluate_budget_alerts(db, family_id, actor_user_id=user.id)
+    budget_service.safe_evaluate_budget_alerts(
+        db, family_id, actor_user_id=user.id, occurred_at=session.completed_at or session.started_at
+    )
     return session_out
 
 

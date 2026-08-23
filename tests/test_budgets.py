@@ -1,12 +1,10 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models.budget import Budget
 from app.models.expense import Expense, SOURCE_MANUAL
 from app.models.family import Family
 from app.services import budget as budget_service
@@ -23,42 +21,57 @@ def test_derive_state_thresholds() -> None:
     assert derive_state(Decimal("120"), Decimal("100")) == (120, "over")
 
 
-def test_month_usage_respects_family_timezone(db_session: Session) -> None:
+def test_period_usage_spans_calendar_months(db_session: Session) -> None:
     family = Family(id=uuid4(), name="TZ Family", timezone="UTC")
     db_session.add(family)
     user_id = uuid4()
-    db_session.add(
-        Expense(
-            family_id=family.id,
-            amount=Decimal("50.00"),
-            currency="EUR",
-            category="Shopping",
-            occurred_at=datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc),
-            created_by=user_id,
-            source_type=SOURCE_MANUAL,
+    for dt, amount in [
+        (datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc), Decimal("10.00")),
+        (datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc), Decimal("50.00")),
+        (datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc), Decimal("25.00")),
+        (datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc), Decimal("5.00")),
+    ]:
+        db_session.add(
+            Expense(
+                family_id=family.id,
+                amount=amount,
+                currency="EUR",
+                category="Shopping",
+                occurred_at=dt,
+                created_by=user_id,
+                source_type=SOURCE_MANUAL,
+            )
         )
-    )
     db_session.commit()
 
-    usage = budget_service.month_usage(db_session, family, "2026-02")
-    assert usage.get("Shopping", Decimal("0")) == Decimal("50.00")
+    from app.models.budget import BudgetPeriod
 
-    usage_jan = budget_service.month_usage(db_session, family, "2026-01")
-    assert usage_jan.get("Shopping", Decimal("0")) == Decimal("0.00")
+    period = BudgetPeriod(
+        family_id=family.id,
+        start_date=date(2026, 8, 27),
+        end_date=date(2026, 9, 26),
+        label_month="2026-09",
+        currency="EUR",
+        created_by=user_id,
+    )
+    db_session.add(period)
+    db_session.commit()
+
+    usage = budget_service.period_usage(db_session, family, period)
+    assert usage.get("Shopping") == Decimal("75.00")
+    assert usage.get(None) == Decimal("75.00")
 
 
-def test_list_budgets_empty(client: TestClient) -> None:
+def test_current_period_empty(client: TestClient) -> None:
     headers = auth_headers(client, "budget-empty@example.com", name="Owner")
     family_id = client.post(
         "/api/families",
         headers=headers,
         json={"name": "Budget Family", "timezone": "UTC"},
     ).json()["id"]
-    res = client.get(f"/api/families/{family_id}/budgets", headers=headers)
+    res = client.get(f"/api/families/{family_id}/budget-periods/current", headers=headers)
     assert res.status_code == 200
-    data = res.json()
-    assert data["overall"] is None
-    assert data["categories"] == []
+    assert res.json() is None
 
 
 def test_spend_includes_null_budget_when_unset(client: TestClient) -> None:
@@ -74,28 +87,46 @@ def test_spend_includes_null_budget_when_unset(client: TestClient) -> None:
 
 
 def test_overall_budget_summary_zero_spend(db_session: Session) -> None:
+    from app.models.budget import Budget, BudgetPeriod
+    from app.models.user import User
+
     family = Family(id=uuid4(), name="Zero", timezone="UTC")
-    user_id = uuid4()
-    db_session.add(family)
+    user = User(id=uuid4(), email=f"{uuid4()}@ex.com", name="U", password_hash="x")
+    db_session.add_all([family, user])
+    today = date.today()
+    period = BudgetPeriod(
+        family_id=family.id,
+        start_date=today.replace(day=1),
+        end_date=today,
+        label_month=f"{today.year:04d}-{today.month:02d}",
+        currency="EUR",
+        created_by=user.id,
+    )
+    db_session.add(period)
+    db_session.flush()
     db_session.add(
-        Budget(
-            family_id=family.id,
-            category=None,
-            amount=Decimal("600.00"),
-            currency="EUR",
-            created_by=user_id,
-        )
+        Budget(period_id=period.id, category=None, amount=Decimal("600.00"))
     )
     db_session.commit()
 
-    summary = budget_service.overall_budget_summary(db_session, family, month="2026-08")
+    summary = budget_service.overall_budget_summary(db_session, family)
     assert summary is not None
     assert summary.used == Decimal("0.00")
     assert summary.state == "ok"
     assert summary.percent_used == 0
+    assert summary.period_id == period.id
+    assert summary.start_date == period.start_date
 
 
-def test_budget_upsert_and_patch(client: TestClient) -> None:
+def _current_window() -> tuple[str, str, str]:
+    today = date.today()
+    start = today - timedelta(days=5)
+    end = today + timedelta(days=20)
+    label = f"{end.year:04d}-{end.month:02d}"
+    return start.isoformat(), end.isoformat(), label
+
+
+def test_budget_period_create_patch_and_overlap(client: TestClient) -> None:
     headers = auth_headers(client, "budget-write@example.com", name="Owner")
     family_id = client.post(
         "/api/families",
@@ -103,37 +134,87 @@ def test_budget_upsert_and_patch(client: TestClient) -> None:
         json={"name": "Write Family", "timezone": "UTC"},
     ).json()["id"]
 
+    start, end, label = _current_window()
     created = client.post(
-        f"/api/families/{family_id}/budgets",
+        f"/api/families/{family_id}/budget-periods",
         headers=headers,
-        json={"category": "Shopping", "amount": "600.00"},
+        json={
+            "start_date": start,
+            "end_date": end,
+            "budgets": [
+                {"category": None, "amount": "1500.00"},
+                {"category": "Shopping", "amount": "600.00"},
+            ],
+        },
     )
-    assert created.status_code == 201
-    budget_id = created.json()["id"]
-    assert float(created.json()["amount"]) == 600.00
-
-    updated = client.post(
-        f"/api/families/{family_id}/budgets",
-        headers=headers,
-        json={"category": "Shopping", "amount": "700.00"},
-    )
-    assert updated.status_code == 200
-    assert updated.json()["id"] == budget_id
-    assert float(updated.json()["amount"]) == 700.00
+    assert created.status_code == 201, created.text
+    data = created.json()
+    period_id = data["id"]
+    assert data["label_month"] == label
+    assert data["overall"] is not None
+    assert float(data["overall"]["amount"]) == 1500.00
+    assert len(data["categories"]) == 1
+    shopping_id = data["categories"][0]["id"]
 
     patched = client.patch(
-        f"/api/budgets/{budget_id}",
+        f"/api/budgets/{shopping_id}",
         headers=headers,
         json={"amount": "650.00"},
     )
     assert patched.status_code == 200
     assert float(patched.json()["amount"]) == 650.00
 
-    deleted = client.delete(f"/api/budgets/{budget_id}", headers=headers)
+    # Replacing budgets on PATCH (e.g. date edit from the sheet) must not
+    # UniqueViolation on uq_budgets_period_overall.
+    new_end = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
+    replaced = client.patch(
+        f"/api/budget-periods/{period_id}",
+        headers=headers,
+        json={
+            "start_date": start,
+            "end_date": new_end,
+            "label_month": new_end[:7],
+            "budgets": [
+                {"category": None, "amount": "1600.00"},
+                {"category": "Shopping", "amount": "700.00"},
+                {"category": "Dining", "amount": "200.00"},
+            ],
+        },
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["end_date"] == new_end
+    assert float(replaced.json()["overall"]["amount"]) == 1600.00
+    assert len(replaced.json()["categories"]) == 2
+
+    overlap = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": start,
+            "end_date": end,
+            "budgets": [{"category": "Dining", "amount": "100.00"}],
+        },
+    )
+    assert overlap.status_code == 400
+
+    next_start = (date.fromisoformat(new_end) + timedelta(days=1)).isoformat()
+    next_end = (date.fromisoformat(new_end) + timedelta(days=30)).isoformat()
+    upcoming = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": next_start,
+            "end_date": next_end,
+            "budgets": [{"category": "Shopping", "amount": "700.00"}],
+        },
+    )
+    assert upcoming.status_code == 201, upcoming.text
+
+    deleted = client.delete(f"/api/budget-periods/{period_id}", headers=headers)
     assert deleted.status_code == 204
 
 
-def test_child_cannot_set_budget(client: TestClient, db_session: Session) -> None:
+def test_child_cannot_set_budget_period(client: TestClient, db_session: Session) -> None:
     from uuid import UUID
 
     from app.models.family import FamilyMember
@@ -158,15 +239,20 @@ def test_child_cannot_set_budget(client: TestClient, db_session: Session) -> Non
     )
     db_session.commit()
 
+    start, end, _ = _current_window()
     blocked = client.post(
-        f"/api/families/{family_id}/budgets",
+        f"/api/families/{family_id}/budget-periods",
         headers=child_headers,
-        json={"amount": "500.00"},
+        json={
+            "start_date": start,
+            "end_date": end,
+            "budgets": [{"amount": "500.00"}],
+        },
     )
     assert blocked.status_code == 403
 
 
-def test_budget_alert_fires_once_at_eighty_percent(client: TestClient, db_session: Session) -> None:
+def test_budget_alert_fires_once_at_eighty_percent(client: TestClient) -> None:
     headers = auth_headers(client, "budget-alert@example.com", name="Owner")
     family_id = client.post(
         "/api/families",
@@ -174,10 +260,15 @@ def test_budget_alert_fires_once_at_eighty_percent(client: TestClient, db_sessio
         json={"name": "Alert Family", "timezone": "UTC"},
     ).json()["id"]
 
+    start, end, _ = _current_window()
     client.post(
-        f"/api/families/{family_id}/budgets",
+        f"/api/families/{family_id}/budget-periods",
         headers=headers,
-        json={"category": "Shopping", "amount": "100.00"},
+        json={
+            "start_date": start,
+            "end_date": end,
+            "budgets": [{"category": "Shopping", "amount": "100.00"}],
+        },
     )
 
     client.post(
@@ -198,6 +289,35 @@ def test_budget_alert_fires_once_at_eighty_percent(client: TestClient, db_sessio
     notifs2 = client.get("/api/notifications", headers=headers).json()
     budget_notifs2 = [n for n in notifs2 if n["type"] == "budget"]
     assert len(budget_notifs2) == 1
+
+    spend = client.get(f"/api/families/{family_id}/spend", headers=headers).json()
+    # overall household budget not set — spend.budget is null
+    assert spend["budget"] is None
+
+
+def test_spend_budget_reflects_current_cycle(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-cycle-spend@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Cycle Spend", "timezone": "UTC"},
+    ).json()["id"]
+    start, end, label = _current_window()
+    client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": start,
+            "end_date": end,
+            "budgets": [{"amount": "600.00"}],
+        },
+    )
+    spend = client.get(f"/api/families/{family_id}/spend", headers=headers).json()
+    assert spend["budget"] is not None
+    assert spend["budget"]["label_month"] == label
+    assert spend["budget"]["start_date"] == start
+    assert spend["budget"]["end_date"] == end
+    assert float(spend["budget"]["amount"]) == 600.0
 
 
 def test_shopping_notification_still_excludes_actor(client: TestClient) -> None:
@@ -224,4 +344,3 @@ def test_shopping_notification_still_excludes_actor(client: TestClient) -> None:
     partner_shopping = [n for n in partner_notifs if n["type"] == "shopping"]
     assert len(owner_shopping) == 0
     assert len(partner_shopping) == 1
-
