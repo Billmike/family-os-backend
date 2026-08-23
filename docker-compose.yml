@@ -26,11 +26,14 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in backend/.env}
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       ENVIRONMENT: development
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RECEIPT_STORAGE_DIR: /app/var/receipts
     volumes:
       # Bind-mount source so --reload picks up local edits without a rebuild
       - ./app:/app/app
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
+      - familyos_receipts:/app/var/receipts
     depends_on:
       db:
         condition: service_healthy
@@ -44,3 +47,4 @@ services:
 
 volumes:
   familyos_pg:
+  familyos_receipts:

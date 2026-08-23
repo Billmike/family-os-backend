@@ -10,6 +10,7 @@ from app.models.user import TimestampMixin
 
 SOURCE_MANUAL = "manual"
 SOURCE_SHOPPING_SESSION = "shopping_session"
+SOURCE_RECEIPT = "receipt"
 
 CATEGORY_SHOPPING = "Shopping"
 CATEGORY_TRANSPORTATION = "Transportation"

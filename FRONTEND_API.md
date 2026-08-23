@@ -860,7 +860,7 @@ Prefer `GET /api/families/{family_id}/spend` for Expenses (all categories).
 
 ## Expenses
 
-Household spend ledger. Completing a shopping trip inserts a `Shopping` expense (`source_type: "shopping_session"`). Manual entries use `source_type: "manual"`.
+Household spend ledger. Completing a shopping trip inserts a `Shopping` expense (`source_type: "shopping_session"`). Manual entries use `source_type: "manual"`. Receipt scans use `source_type: "receipt"` and link to a `Receipt` via `source_id`.
 
 Categories: `Shopping`, `Transportation`, `Housing`, `Utilities`, `Dining`, `Health`, `Childcare`, `Other`.
 
@@ -952,7 +952,7 @@ Monthly household spend for Expenses. Totals come from the expense ledger (all c
 
 ### `PATCH /api/expenses/{expense_id}`
 
-Update a **manual** expense. Shopping-sourced rows return `400`.
+Update a **manual** or **receipt** expense. Shopping-sourced rows return `400`.
 
 **Request** — any subset of `amount`, `category`, `merchant`, `note`, `occurred_at`.
 
@@ -962,7 +962,127 @@ Update a **manual** expense. Shopping-sourced rows return `400`.
 
 ### `DELETE /api/expenses/{expense_id}`
 
-**Response `204`**. Broadcasts `{ "type": "expense.deleted", "expense_id": "..." }`. Manual expenses only; shopping-sourced rows return `400`.
+**Response `204`**. Broadcasts `{ "type": "expense.deleted", "expense_id": "..." }`. Manual and receipt expenses only; shopping-sourced rows return `400`. Deleting a receipt expense also removes the linked receipt image.
+
+---
+
+## Receipts
+
+Upload a receipt photo, extract merchant / line items / total with OpenAI vision, then confirm to create an itemized expense (`source_type: "receipt"`).
+
+Requires `OPENAI_API_KEY`. When missing or `RECEIPT_SCANNING_ENABLED=false`, upload returns `503` with `code: receipt_scanning_unavailable`.
+
+Accepted images: JPEG, PNG, WebP (validated by magic bytes). Max size: `RECEIPT_MAX_BYTES` (default 10 MB).
+
+### `POST /api/families/{family_id}/receipts`
+
+Multipart form: `file` (required), `category_hint` (optional string).
+
+**Response `202`** — `ReceiptOut` with `status: "processing"`. Extraction runs in a background task. Broadcasts `receipt.ready` or `receipt.failed` when finished.
+
+### `GET /api/families/{family_id}/receipts`
+
+Optional query: `status` (`processing` | `ready` | `failed` | `confirmed`).
+
+**Response `200`** — `ReceiptOut[]` (newest first), including `items` when ready.
+
+### `GET /api/receipts/{receipt_id}`
+
+Poll target while status is `processing`.
+
+**Response `200`** — `ReceiptOut`.
+
+### `GET /api/receipts/{receipt_id}/image`
+
+Auth-checked binary image (`FileResponse`). Use an authenticated fetch; do not put the JWT in an `<img src>`.
+
+### `POST /api/receipts/{receipt_id}/confirm`
+
+Create (or return existing) expense from a ready/failed receipt. Edits are submitted once here — there is no `PATCH /receipts/{id}`.
+
+**Request**
+
+```json
+{
+  "category": "Shopping",
+  "merchant": "REWE",
+  "note": "Weekly shop",
+  "occurred_at": "2026-08-22T14:36:56Z",
+  "currency": "EUR",
+  "total": "52.10",
+  "items": [
+    {
+      "name": "OLIVENOEL",
+      "quantity": "2",
+      "unit": "Stk",
+      "unit_price": "5.99",
+      "total_price": "11.98",
+      "tax_code": "B",
+      "is_included": true
+    }
+  ]
+}
+```
+
+**Response `200`** — `ExpenseOut` with `source_type: "receipt"`, `source_id` = receipt id. Broadcasts `expense.created`. Idempotent if already confirmed.
+
+**Response `400`** — still processing (`code: receipt_not_ready`) or invalid state.
+
+### `DELETE /api/receipts/{receipt_id}`
+
+Discard a draft (not yet confirmed). Deletes the stored image.
+
+**Response `204`**. Broadcasts `{ "type": "receipt.deleted", "receipt_id": "..." }`.
+
+### `GET /api/expenses/{expense_id}/receipt`
+
+**Response `200`** — `ReceiptOut` for a receipt-sourced expense.
+
+### `ReceiptOut` shape
+
+```json
+{
+  "id": "...",
+  "family_id": "...",
+  "uploaded_by": "...",
+  "status": "ready",
+  "mime_type": "image/jpeg",
+  "byte_size": 184320,
+  "original_filename": "receipt.jpg",
+  "category_hint": null,
+  "suggested_category": "Shopping",
+  "merchant": "REWE",
+  "purchased_at": "2026-08-22T14:36:56Z",
+  "currency": "EUR",
+  "subtotal": "47.33",
+  "tax_total": "4.77",
+  "total": "52.10",
+  "totals_mismatch": false,
+  "model_name": "gpt-4o-mini",
+  "error_message": null,
+  "expense_id": null,
+  "items": [
+    {
+      "id": "...",
+      "receipt_id": "...",
+      "position": 0,
+      "name": "PILZ CHAMP.BRAUN",
+      "quantity": "0.142",
+      "unit": "kg",
+      "unit_price": "6.90",
+      "total_price": "0.98",
+      "tax_code": "B",
+      "is_included": true,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+`totals_mismatch` is `true` when the sum of line totals differs from the printed total by more than €0.02. The printed total is never overwritten.
 
 ---
 
@@ -1175,6 +1295,20 @@ ws://localhost:8001/api/ws/families/{family_id}?token=<access_token>
 { "type": "expense.deleted", "expense_id": "..." }
 ```
 
+**Receipts**
+
+```json
+{ "type": "receipt.ready", "receipt": { } }
+```
+
+```json
+{ "type": "receipt.failed", "receipt": { } }
+```
+
+```json
+{ "type": "receipt.deleted", "receipt_id": "..." }
+```
+
 **Events**
 
 ```json
@@ -1329,6 +1463,13 @@ async function api<T>(
 | GET | `/api/families/{family_id}/spend` | Yes |
 | PATCH | `/api/expenses/{expense_id}` | Yes |
 | DELETE | `/api/expenses/{expense_id}` | Yes |
+| POST | `/api/families/{family_id}/receipts` | Yes |
+| GET | `/api/families/{family_id}/receipts` | Yes |
+| GET | `/api/receipts/{receipt_id}` | Yes |
+| GET | `/api/receipts/{receipt_id}/image` | Yes |
+| POST | `/api/receipts/{receipt_id}/confirm` | Yes |
+| DELETE | `/api/receipts/{receipt_id}` | Yes |
+| GET | `/api/expenses/{expense_id}/receipt` | Yes |
 | GET | `/api/notifications` | Yes |
 | POST | `/api/notifications/{id}/read` | Yes |
 | POST | `/api/notifications/read-all` | Yes |

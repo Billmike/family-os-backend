@@ -71,6 +71,20 @@ uv run pytest -q
 7. Run migrations on deploy: `alembic upgrade head` (Cloud Run job or startup command).
 8. Pin Cloud Run (or equivalent) to **`--max-instances=1`** until Redis (or another shared revoke/fan-out bus) exists. In-memory WebSocket rooms cannot disconnect sockets on other instances after leave/kick. Single instance is enough for MVP WebSocket fan-out; add Redis later if you scale horizontally.
 
+## Receipt scanning
+
+Set these in `.env` (see `.env.example`):
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | Required for extraction. Empty → upload returns 503. |
+| `OPENAI_MODEL` | Default `gpt-4o-mini` |
+| `RECEIPT_SCANNING_ENABLED` | Default `true` |
+| `RECEIPT_STORAGE_DIR` | Local directory for images (Docker volume `/app/var/receipts`) |
+| `RECEIPT_MAX_BYTES` | Default `10485760` (10 MB) |
+
+Images are stored on disk and served via `GET /api/receipts/{id}/image` (auth required).
+
 ## Auth
 
 - `POST /api/auth/register` — email, password, name

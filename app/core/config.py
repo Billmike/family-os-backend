@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     public_app_url: str = "http://localhost:3000"
     # log = stdout stub; future: resend, sendgrid, etc.
     email_provider: str = "log"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    receipt_scanning_enabled: bool = True
+    receipt_storage_dir: str = "var/receipts"
+    receipt_max_bytes: int = 10_485_760
 
     @property
     def cors_origin_list(self) -> list[str]:

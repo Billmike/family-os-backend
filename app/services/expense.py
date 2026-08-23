@@ -18,10 +18,12 @@ from app.core.timeutil import (
 from app.models.expense import (
     CATEGORY_SHOPPING,
     SOURCE_MANUAL,
+    SOURCE_RECEIPT,
     SOURCE_SHOPPING_SESSION,
     Expense,
 )
 from app.models.family import Family
+from app.models.receipt import ReceiptItem
 from app.models.shopping_session import ShoppingSession, ShoppingSessionItem
 from app.models.user import User
 from app.realtime.hub import hub
@@ -49,15 +51,32 @@ def _source_item_counts(db: Session, expenses: list[Expense]) -> dict[UUID, int]
         for expense in expenses
         if expense.source_type == SOURCE_SHOPPING_SESSION and expense.source_id is not None
     ]
-    if not session_ids:
-        return {}
-    rows = (
-        db.query(ShoppingSessionItem.session_id, func.count(ShoppingSessionItem.id))
-        .filter(ShoppingSessionItem.session_id.in_(session_ids))
-        .group_by(ShoppingSessionItem.session_id)
-        .all()
-    )
-    return {session_id: int(count) for session_id, count in rows}
+    receipt_ids = [
+        expense.source_id
+        for expense in expenses
+        if expense.source_type == SOURCE_RECEIPT and expense.source_id is not None
+    ]
+    counts: dict[UUID, int] = {}
+    if session_ids:
+        rows = (
+            db.query(ShoppingSessionItem.session_id, func.count(ShoppingSessionItem.id))
+            .filter(ShoppingSessionItem.session_id.in_(session_ids))
+            .group_by(ShoppingSessionItem.session_id)
+            .all()
+        )
+        counts.update({session_id: int(count) for session_id, count in rows})
+    if receipt_ids:
+        rows = (
+            db.query(ReceiptItem.receipt_id, func.count(ReceiptItem.id))
+            .filter(
+                ReceiptItem.receipt_id.in_(receipt_ids),
+                ReceiptItem.is_included.is_(True),
+            )
+            .group_by(ReceiptItem.receipt_id)
+            .all()
+        )
+        counts.update({receipt_id: int(count) for receipt_id, count in rows})
+    return counts
 
 
 def expense_to_out(expense: Expense, *, source_item_count: int | None = None) -> ExpenseOut:
@@ -96,8 +115,11 @@ def get_expense(db: Session, expense_id: UUID) -> Expense:
     return expense
 
 
-def _require_manual(expense: Expense) -> None:
-    if expense.source_type != SOURCE_MANUAL:
+_EDITABLE_SOURCES = (SOURCE_MANUAL, SOURCE_RECEIPT)
+
+
+def _require_editable(expense: Expense) -> None:
+    if expense.source_type not in _EDITABLE_SOURCES:
         raise bad_request("Shopping trip expenses cannot be edited here")
 
 
@@ -190,7 +212,7 @@ def list_expenses(
 
 
 def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> ExpenseOut:
-    _require_manual(expense)
+    _require_editable(expense)
     fields = data.model_fields_set
     if "amount" in fields and data.amount is not None:
         expense.amount = data.amount
@@ -205,15 +227,21 @@ def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> Expens
     expense.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(expense)
-    out = expense_to_out(expense, source_item_count=None)
-    _broadcast(expense.family_id, "expense.updated", expense, source_item_count=None)
+    counts = _source_item_counts(db, [expense])
+    count = counts.get(expense.source_id) if expense.source_id else None
+    out = expense_to_out(expense, source_item_count=count)
+    _broadcast(expense.family_id, "expense.updated", expense, source_item_count=count)
     return out
 
 
 def delete_expense(db: Session, expense: Expense) -> None:
-    _require_manual(expense)
+    _require_editable(expense)
     expense_id = expense.id
     family_id = expense.family_id
+    if expense.source_type == SOURCE_RECEIPT:
+        from app.services import receipt as receipt_service
+
+        receipt_service.delete_receipt_for_expense(db, expense)
     db.delete(expense)
     db.commit()
     hub.broadcast(

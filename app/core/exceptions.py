@@ -34,6 +34,10 @@ def bad_request(detail: str = "Bad request", code: str = "bad_request") -> AppEr
     return AppError(status.HTTP_400_BAD_REQUEST, detail, code)
 
 
+def service_unavailable(detail: str = "Service unavailable", code: str = "service_unavailable") -> AppError:
+    return AppError(status.HTTP_503_SERVICE_UNAVAILABLE, detail, code)
+
+
 def error_body(exc: HTTPException) -> dict[str, Any]:
     if isinstance(exc.detail, dict) and "code" in exc.detail:
         return exc.detail

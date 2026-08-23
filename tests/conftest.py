@@ -1,5 +1,6 @@
 import os
 from collections.abc import Generator
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 os.environ["JWT_SECRET"] = "test-secret"
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["ENVIRONMENT"] = "test"
+os.environ["OPENAI_API_KEY"] = ""
 
 from app.core.database import Base, get_db
 from app.main import app as fastapi_app
@@ -38,6 +40,12 @@ def db_session() -> Generator[Session, None, None]:
 
 @pytest.fixture()
 def client(db_session: Session) -> Generator[TestClient, None, None]:
+    TestingSessionLocal = sessionmaker(
+        bind=db_session.get_bind(),
+        autocommit=False,
+        autoflush=False,
+    )
+
     def override_get_db() -> Generator[Session, None, None]:
         try:
             yield db_session
@@ -46,8 +54,10 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
 
     fastapi_app.dependency_overrides[get_db] = override_get_db
     stop_scheduler()
-    with TestClient(fastapi_app) as test_client:
-        yield test_client
+    # BackgroundTasks that open SessionLocal must share the test DB
+    with patch("app.services.receipt.SessionLocal", TestingSessionLocal):
+        with TestClient(fastapi_app) as test_client:
+            yield test_client
     fastapi_app.dependency_overrides.clear()
     stop_scheduler()
 
