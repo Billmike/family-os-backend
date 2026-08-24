@@ -798,6 +798,28 @@ Undo: restores the item to the family groceries list and removes it from the bas
 }
 ```
 
+### `PATCH /api/shopping-session-items/{session_item_id}`
+
+Edit an item that is already in the basket. Active session only.
+
+**Request** (all optional)
+
+```json
+{
+  "name": "Oat milk",
+  "quantity": 2,
+  "unit": "L",
+  "category": "Dairy",
+  "location_id": null
+}
+```
+
+`quantity` must be greater than zero. `location_id` must belong to the same family; set it to `null` to clear the store. Basket items carry a denormalized `location_name`, which the API keeps in step with `location_id`.
+
+**Response `200`** — `ShoppingSessionItemOut`. Broadcasts `shopping.session.item.updated`.
+
+**Response `400`** — the session is already completed, or the store belongs to another family.
+
 ### `POST /api/families/{family_id}/shopping-sessions/active/complete`
 
 **Request**
@@ -1577,6 +1599,7 @@ async function api<T>(
 | DELETE | `/api/shopping-items/{item_id}` | Yes |
 | GET | `/api/families/{family_id}/shopping-sessions/active` | Yes |
 | POST | `/api/families/{family_id}/shopping-sessions/active/items` | Yes |
+| PATCH | `/api/shopping-session-items/{id}` | Yes |
 | DELETE | `/api/shopping-session-items/{id}` | Yes |
 | POST | `/api/families/{family_id}/shopping-sessions/active/complete` | Yes |
 | GET | `/api/families/{family_id}/shopping-sessions` | Yes |

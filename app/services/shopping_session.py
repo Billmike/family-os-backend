@@ -29,6 +29,7 @@ from app.schemas.shopping_session import (
     ShoppingSessionItemOut,
     ShoppingSessionOut,
     ShoppingSpendOut,
+    UpdateSessionItemRequest,
 )
 from app.services import budget as budget_service
 from app.services import expense as expense_service
@@ -438,10 +439,8 @@ def reorder_session(
 def update_session_item(
     db: Session,
     session_item_id: UUID,
-    quantity: "Decimal",
+    data: UpdateSessionItemRequest,
 ) -> ShoppingSessionItemOut:
-    from decimal import Decimal as _Decimal
-
     session_item = db.get(ShoppingSessionItem, session_item_id)
     if session_item is None:
         raise not_found("Basket item not found")
@@ -450,7 +449,22 @@ def update_session_item(
     if session is None or session.status != SESSION_STATUS_ACTIVE:
         raise bad_request("Can only edit items in an active session")
 
-    session_item.quantity = quantity
+    if data.name is not None:
+        session_item.name = data.name.strip()
+    if data.quantity is not None:
+        session_item.quantity = data.quantity
+    if data.unit is not None:
+        session_item.unit = data.unit
+    if data.category is not None:
+        session_item.category = data.category
+    if "location_id" in data.model_dump(exclude_unset=True):
+        location = shopping_service.resolve_location_for_family(
+            db, session.family_id, data.location_id
+        )
+        session_item.location_id = location.id if location else None
+        # Basket items denormalize the store name, so keep the two in step.
+        session_item.location_name = location.name if location else None
+
     session.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(session_item)

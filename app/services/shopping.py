@@ -114,15 +114,15 @@ def delete_location(db: Session, loc: ShoppingLocation) -> None:
     db.commit()
 
 
-def _resolve_location_for_family(
+def resolve_location_for_family(
     db: Session, family_id: UUID, location_id: UUID | None
-) -> UUID | None:
+) -> ShoppingLocation | None:
     if location_id is None:
         return None
     loc = db.get(ShoppingLocation, location_id)
     if loc is None or loc.family_id != family_id:
         raise bad_request("Shopping location does not belong to this family")
-    return loc.id
+    return loc
 
 
 def list_items(db: Session, list_id: UUID) -> list[ShoppingItem]:
@@ -141,14 +141,14 @@ def create_item(
     data: ShoppingItemCreate,
     background_tasks: BackgroundTasks | None = None,
 ) -> ShoppingItem:
-    location_id = _resolve_location_for_family(db, lst.family_id, data.location_id)
+    location = resolve_location_for_family(db, lst.family_id, data.location_id)
     item = ShoppingItem(
         shopping_list_id=lst.id,
         name=data.name.strip(),
         quantity=data.quantity,
         unit=data.unit,
         category=data.category,
-        location_id=location_id,
+        location_id=location.id if location else None,
         created_by=user.id,
     )
     db.add(item)
@@ -197,9 +197,10 @@ def update_item(
         item.category = data.category
     fields_set = data.model_dump(exclude_unset=True)
     if "location_id" in fields_set:
-        item.location_id = _resolve_location_for_family(
+        location = resolve_location_for_family(
             db, item.shopping_list.family_id, data.location_id
         )
+        item.location_id = location.id if location else None
     event_type = "shopping.item.updated"
     marked_bought = False
     if data.completed is not None:

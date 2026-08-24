@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.schemas.auth import ORMModel
+from app.schemas.shopping import MAX_SHOPPING_CATEGORY, MAX_SHOPPING_UNIT
 
 
 class ShoppingSessionItemOut(ORMModel):
@@ -59,7 +60,11 @@ class ShoppingSpendOut(BaseModel):
 
 
 class UpdateSessionItemRequest(BaseModel):
-    quantity: Decimal = Field(gt=0)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    quantity: Decimal | None = Field(default=None, gt=0)
+    unit: str | None = Field(default=None, max_length=MAX_SHOPPING_UNIT)
+    category: str | None = Field(default=None, max_length=MAX_SHOPPING_CATEGORY)
+    location_id: UUID | None = None
 
 
 class AddToBasketResponse(BaseModel):

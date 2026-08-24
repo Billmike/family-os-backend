@@ -160,7 +160,7 @@ def update_session_item(
         raise not_found("Basket item not found")
     session = session_service.get_session(db, item.session_id)
     get_membership(db, session.family_id, user.id)
-    return session_service.update_session_item(db, session_item_id, data.quantity)
+    return session_service.update_session_item(db, session_item_id, data)
 
 
 @router.get("/api/shopping-sessions/{session_id}", response_model=ShoppingSessionOut)

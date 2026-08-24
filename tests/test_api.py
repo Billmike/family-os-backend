@@ -1049,6 +1049,157 @@ def test_shopping_session_basket_flow(client: TestClient) -> None:
     assert len(remaining.json()) == 0
 
 
+def test_update_basket_item_fields(client: TestClient) -> None:
+    headers = auth_headers(client, "basket-edit@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Basket Edit Family", "timezone": "UTC"},
+    ).json()["id"]
+    list_id = client.get(
+        f"/api/families/{family_id}/shopping-lists", headers=headers
+    ).json()[0]["id"]
+
+    store_a = client.post(
+        f"/api/families/{family_id}/shopping-locations",
+        headers=headers,
+        json={"name": "Corner Store"},
+    )
+    assert store_a.status_code == 200
+    store_a_id = store_a.json()["id"]
+
+    store_b = client.post(
+        f"/api/families/{family_id}/shopping-locations",
+        headers=headers,
+        json={"name": "Farmers Market"},
+    )
+    assert store_b.status_code == 200
+    store_b_id = store_b.json()["id"]
+
+    item = client.post(
+        f"/api/shopping-lists/{list_id}/items",
+        headers=headers,
+        json={
+            "name": "Milk",
+            "category": "Dairy",
+            "quantity": 2,
+            "location_id": store_a_id,
+        },
+    )
+    assert item.status_code == 200
+
+    added = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/items",
+        headers=headers,
+        json={"item_id": item.json()["id"]},
+    )
+    assert added.status_code == 200
+    session_item_id = added.json()["item"]["id"]
+    assert added.json()["item"]["location_name"] == "Corner Store"
+
+    # A rename leaves every other field alone.
+    renamed = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"name": "  Oat milk  "},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Oat milk"
+    assert float(renamed.json()["quantity"]) == 2
+    assert renamed.json()["category"] == "Dairy"
+    assert renamed.json()["location_id"] == store_a_id
+
+    # Quantity-only updates still work, so existing clients keep functioning.
+    requantified = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"quantity": 5},
+    )
+    assert requantified.status_code == 200
+    assert float(requantified.json()["quantity"]) == 5
+    assert requantified.json()["name"] == "Oat milk"
+
+    recategorized = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"category": "Other", "unit": "L"},
+    )
+    assert recategorized.status_code == 200
+    assert recategorized.json()["category"] == "Other"
+    assert recategorized.json()["unit"] == "L"
+
+    # The denormalized store name has to follow the store id.
+    restored = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"location_id": store_b_id},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["location_id"] == store_b_id
+    assert restored.json()["location_name"] == "Farmers Market"
+
+    cleared = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"location_id": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["location_id"] is None
+    assert cleared.json()["location_name"] is None
+
+    active = client.get(
+        f"/api/families/{family_id}/shopping-sessions/active", headers=headers
+    )
+    assert active.json()["items"][0]["name"] == "Oat milk"
+
+    invalid_quantity = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"quantity": 0},
+    )
+    assert invalid_quantity.status_code == 422
+
+    blank_name = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"name": ""},
+    )
+    assert blank_name.status_code == 422
+
+    outsider = auth_headers(client, "basket-outsider@example.com", name="Outsider")
+    other_family_id = client.post(
+        "/api/families",
+        headers=outsider,
+        json={"name": "Other Family", "timezone": "UTC"},
+    ).json()["id"]
+    foreign_store_id = client.post(
+        f"/api/families/{other_family_id}/shopping-locations",
+        headers=outsider,
+        json={"name": "Their Store"},
+    ).json()["id"]
+
+    foreign_store = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"location_id": foreign_store_id},
+    )
+    assert foreign_store.status_code == 400
+
+    completed = client.post(
+        f"/api/families/{family_id}/shopping-sessions/active/complete",
+        headers=headers,
+        json={"total_cost": "12.00"},
+    )
+    assert completed.status_code == 200
+
+    after_completion = client.patch(
+        f"/api/shopping-session-items/{session_item_id}",
+        headers=headers,
+        json={"name": "Too late"},
+    )
+    assert after_completion.status_code == 400
+
+
 def _add_and_complete_trip(
     client: TestClient,
     headers: dict,
