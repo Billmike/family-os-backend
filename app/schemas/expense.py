@@ -1,24 +1,11 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.expense import EXPENSE_CATEGORIES
 from app.schemas.auth import ORMModel
 from app.schemas.budget import BudgetSummaryOut
-
-ExpenseCategory = Literal[
-    "Shopping",
-    "Transportation",
-    "Housing",
-    "Utilities",
-    "Dining",
-    "Health",
-    "Childcare",
-    "Other",
-]
 
 MAX_MERCHANT = 120
 MAX_NOTE = 500
@@ -33,7 +20,7 @@ def _blank_to_none(value: str | None) -> str | None:
 
 class ExpenseCreate(BaseModel):
     amount: Decimal = Field(gt=0)
-    category: ExpenseCategory
+    subcategory_id: UUID
     merchant: str | None = Field(default=None, max_length=MAX_MERCHANT)
     note: str | None = Field(default=None, max_length=MAX_NOTE)
     occurred_at: datetime | None = None
@@ -52,7 +39,7 @@ class ExpenseCreate(BaseModel):
 
 class ExpenseUpdate(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0)
-    category: ExpenseCategory | None = None
+    subcategory_id: UUID | None = None
     merchant: str | None = Field(default=None, max_length=MAX_MERCHANT)
     note: str | None = Field(default=None, max_length=MAX_NOTE)
     occurred_at: datetime | None = None
@@ -68,7 +55,10 @@ class ExpenseOut(ORMModel):
     family_id: UUID
     amount: Decimal
     currency: str
-    category: str
+    subcategory_id: UUID
+    subcategory_name: str
+    group: str
+    direction: str
     merchant: str | None
     note: str | None
     occurred_at: datetime
@@ -81,7 +71,11 @@ class ExpenseOut(ORMModel):
 
 
 class CategorySpendOut(BaseModel):
+    """Per-subcategory (or group) spend row in monthly aggregation."""
+
     category: str
+    subcategory_id: UUID | None = None
+    group: str | None = None
     total: Decimal
     count: int
 
@@ -100,15 +94,3 @@ class HouseholdSpendOut(BaseModel):
     year_to_date_total: Decimal
     months: list[MonthlyHouseholdSpendOut]
     budget: BudgetSummaryOut | None = None
-
-
-assert set(EXPENSE_CATEGORIES) == {
-    "Shopping",
-    "Transportation",
-    "Housing",
-    "Utilities",
-    "Dining",
-    "Health",
-    "Childcare",
-    "Other",
-}

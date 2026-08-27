@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Uuid, text
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -37,28 +37,24 @@ class Budget(Base, TimestampMixin):
     __tablename__ = "budgets"
     __table_args__ = (
         Index(
-            "uq_budgets_period_category",
+            "uq_budgets_period_subcategory",
             "period_id",
-            "category",
+            "subcategory_id",
             unique=True,
-            postgresql_where=text("category IS NOT NULL"),
-            sqlite_where=text("category IS NOT NULL"),
-        ),
-        Index(
-            "uq_budgets_period_overall",
-            "period_id",
-            unique=True,
-            postgresql_where=text("category IS NULL"),
-            sqlite_where=text("category IS NULL"),
         ),
         Index("ix_budgets_period_id", "period_id"),
+        Index("ix_budgets_subcategory_id", "subcategory_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     period_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("budget_periods.id", ondelete="CASCADE"), nullable=False
     )
-    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    subcategory_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("budget_subcategories.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
 
     period: Mapped[BudgetPeriod] = relationship("BudgetPeriod", back_populates="budgets")

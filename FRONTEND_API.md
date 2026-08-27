@@ -994,13 +994,22 @@ When a household budget exists for the **current pay cycle**, the response inclu
 
 ## Budgets
 
-Dated **pay-cycle periods** with per-cycle amounts for the household total and/or individual expense categories. Parents and owners write; all members read.
+Dated **pay-cycle periods** with Expected amounts per family-defined **subcategory** under six fixed groups: Income, Fixed Expense, Variable Expense, Debt, Savings, Investment. Parents and owners write; all members read.
 
-A period has explicit `start_date` / `end_date` (inclusive, family-local dates). `label_month` is the destination month (`YYYY-MM`), defaulting to the month of `end_date` (e.g. 27 Aug–26 Sep → `2026-09`). Periods for a family must not overlap. Expenses still appear in calendar-month spend; they count toward a cycle when `occurred_at` falls in the period window.
+A period has explicit `start_date` / `end_date` (inclusive, family-local dates). `label_month` is the destination month (`YYYY-MM`), defaulting to the month of `end_date`. Periods for a family must not overlap. New cycles default to the calendar month. Ledger Actuals roll up by `subcategory_id`; Income is excluded from `/spend`.
+
+### Subcategories
+
+- `GET /api/families/{family_id}/budget-subcategories` — grouped list (auto-seeds defaults on first read)
+- `POST /api/families/{family_id}/budget-subcategories` — `{ group, name }`
+- `PATCH /api/budget-subcategories/{id}` — rename / move / reorder
+- `DELETE /api/budget-subcategories/{id}` — soft-archive (Groceries/`role=groceries` cannot be archived)
+
+### Periods
 
 ### `GET /api/families/{family_id}/budget-periods/current`
 
-Auth + membership. Current cycle covering today in the family timezone, with nested budgets and usage.
+Auth + membership. Current cycle covering today in the family timezone.
 
 **Response `200`** — `BudgetPeriodOut` or `null`.
 
@@ -1012,20 +1021,61 @@ Auth + membership. Current cycle covering today in the family timezone, with nes
   "end_date": "2026-09-26",
   "label_month": "2026-09",
   "currency": "EUR",
-  "overall": { },
-  "categories": [ ],
+  "groups": [
+    {
+      "group": "Fixed Expense",
+      "direction": "outflow",
+      "expected": "1370.30",
+      "actual": "0.00",
+      "lines": [
+        {
+          "id": "...",
+          "subcategory_id": "...",
+          "subcategory_name": "Rent",
+          "group": "Fixed Expense",
+          "amount": "1370.30",
+          "used": "0.00",
+          "settled": false,
+          "percent_used": 0,
+          "state": "ok"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "income_expected": "10910.32",
+    "income_actual": "0.00",
+    "total_expenses_expected": "8563.79",
+    "total_expenses_actual": "0.00",
+    "left_over_expected": "2346.53",
+    "left_over_actual": "0.00"
+  },
   "created_at": "...",
   "updated_at": "..."
 }
 ```
 
-`overall` / `categories` rows include `used`, `remaining`, `percent_used`, `state`.
+### `POST /api/families/{family_id}/budget-periods`
 
-### `GET /api/families/{family_id}/budget-periods`
+Body: `{ start_date, end_date, label_month?, currency?, budgets: [{ subcategory_id, amount }] }`
 
-**Query:** `include` — comma list of `current`, `past`, `upcoming` (default `current,past`).
+### `POST /api/families/{family_id}/budget-periods/copy`
 
-**Response `200`:** `{ "periods": [ BudgetPeriodOut, ... ] }` newest start first.
+Clone lines from the previous (or specified) period into a new date range.
+
+### `POST /api/budgets/{budget_id}/settle` / `DELETE .../settle`
+
+Create or remove the settlement ledger entry (`source_type=budget_line`) equal to Expected.
+
+### `GET /api/families/{family_id}/budget-insights?months=12`
+
+Per-month group expected/actual, income, outflow, and net for charts.
+
+### Expenses
+
+Expense create/update take `subcategory_id` instead of `category`. Responses include `subcategory_id`, `subcategory_name`, `group`, and `direction`.
+
+---
 
 ### `POST /api/families/{family_id}/budget-periods`
 

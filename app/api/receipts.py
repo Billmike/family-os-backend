@@ -58,7 +58,7 @@ def get_receipt(
 ) -> ReceiptOut:
     receipt = receipt_service.get_receipt(db, receipt_id)
     get_membership(db, receipt.family_id, user.id)
-    return receipt_service.receipt_to_out(receipt)
+    return receipt_service.receipt_to_out_resolved(db, receipt)
 
 
 @router.get("/api/receipts/{receipt_id}/image")

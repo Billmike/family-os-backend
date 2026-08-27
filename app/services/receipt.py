@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import bad_request, not_found, service_unavailable
-from app.models.expense import CATEGORY_SHOPPING, SOURCE_RECEIPT, Expense
+from app.models.expense import SOURCE_RECEIPT, Expense
 from app.models.family import Family
 from app.models.receipt import (
     STATUS_CONFIRMED,
@@ -24,10 +24,12 @@ from app.realtime.hub import hub
 from app.schemas.expense import ExpenseOut
 from app.schemas.receipt import ReceiptConfirm, ReceiptItemOut, ReceiptOut
 from app.services import budget as budget_service
+from app.services import budget_subcategory as subcategory_service
 from app.services import expense as expense_service
 from app.services import receipt_extraction
 from app.services import receipt_storage
 from app.services import shopping_session as shopping_session_service
+from app.models.budget_group import ROLE_GROCERIES
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ def _as_money(value: Decimal | None) -> Decimal | None:
     return Decimal(str(value)).quantize(_MONEY, rounding=ROUND_HALF_UP)
 
 
-def receipt_to_out(receipt: Receipt) -> ReceiptOut:
+def receipt_to_out(receipt: Receipt, *, suggested_subcategory_id: UUID | None = None) -> ReceiptOut:
     items = sorted(receipt.items, key=lambda item: item.position)
     return ReceiptOut(
         id=receipt.id,
@@ -52,6 +54,7 @@ def receipt_to_out(receipt: Receipt) -> ReceiptOut:
         original_filename=receipt.original_filename,
         category_hint=receipt.category_hint,
         suggested_category=receipt.suggested_category,
+        suggested_subcategory_id=suggested_subcategory_id,
         merchant=receipt.merchant,
         purchased_at=receipt.purchased_at,
         currency=receipt.currency,
@@ -85,12 +88,34 @@ def receipt_to_out(receipt: Receipt) -> ReceiptOut:
     )
 
 
-def _broadcast(family_id: UUID, event_type: str, receipt: Receipt) -> None:
+def _resolve_suggested_subcategory_id(db: Session, receipt: Receipt) -> UUID | None:
+    if not receipt.suggested_category:
+        return None
+    try:
+        sub = subcategory_service.subcategory_for_legacy_category(
+            db, receipt.family_id, receipt.suggested_category
+        )
+        return sub.id
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def receipt_to_out_resolved(db: Session, receipt: Receipt) -> ReceiptOut:
+    return receipt_to_out(
+        receipt,
+        suggested_subcategory_id=_resolve_suggested_subcategory_id(db, receipt),
+    )
+
+
+def _broadcast(family_id: UUID, event_type: str, receipt: Receipt, db: Session | None = None) -> None:
+    suggested_id = None
+    if db is not None:
+        suggested_id = _resolve_suggested_subcategory_id(db, receipt)
     hub.broadcast(
         family_id,
         {
             "type": event_type,
-            "receipt": receipt_to_out(receipt).model_dump(mode="json"),
+            "receipt": receipt_to_out(receipt, suggested_subcategory_id=suggested_id).model_dump(mode="json"),
         },
     )
 
@@ -121,7 +146,7 @@ def list_receipts(
     if status is not None:
         query = query.filter(Receipt.status == status)
     rows = query.order_by(Receipt.created_at.desc()).all()
-    return [receipt_to_out(row) for row in rows]
+    return [receipt_to_out_resolved(db, row) for row in rows]
 
 
 def get_receipt_for_expense(db: Session, expense: Expense) -> ReceiptOut:
@@ -133,7 +158,7 @@ def get_receipt_for_expense(db: Session, expense: Expense) -> ReceiptOut:
     )
     if receipt is None:
         raise not_found("No receipt linked to this expense")
-    return receipt_to_out(receipt)
+    return receipt_to_out_resolved(db, receipt)
 
 
 def create_receipt(
@@ -232,7 +257,7 @@ def run_extraction(receipt_id: UUID) -> None:
             db.commit()
             db.refresh(receipt)
             receipt = get_receipt(db, receipt.id)
-            _broadcast(receipt.family_id, "receipt.ready", receipt)
+            _broadcast(receipt.family_id, "receipt.ready", receipt, db)
         except Exception as exc:
             logger.exception("Receipt extraction failed for %s", receipt_id)
             db.rollback()
@@ -245,7 +270,7 @@ def run_extraction(receipt_id: UUID) -> None:
             db.commit()
             db.refresh(receipt)
             receipt = get_receipt(db, receipt.id)
-            _broadcast(receipt.family_id, "receipt.failed", receipt)
+            _broadcast(receipt.family_id, "receipt.failed", receipt, db)
     finally:
         db.close()
 
@@ -260,7 +285,8 @@ def confirm_receipt(
         expense = expense_service.get_expense(db, receipt.expense_id)
         counts = expense_service._source_item_counts(db, [expense])
         count = counts.get(expense.source_id) if expense.source_id else None
-        return expense_service.expense_to_out(expense, source_item_count=count)
+        sub = subcategory_service.get_subcategory_any(db, expense.subcategory_id)
+        return expense_service.expense_to_out(expense, subcategory=sub, source_item_count=count)
 
     if receipt.status not in (STATUS_READY, STATUS_FAILED):
         if receipt.status == STATUS_PROCESSING:
@@ -269,6 +295,10 @@ def confirm_receipt(
 
     if data.total <= 0:
         raise bad_request("Total must be greater than zero")
+
+    sub = subcategory_service.get_subcategory(db, data.subcategory_id)
+    if sub.family_id != receipt.family_id:
+        raise bad_request("Invalid budget subcategory")
 
     # Replace items with the confirmed set
     for existing in list(receipt.items):
@@ -294,8 +324,9 @@ def confirm_receipt(
         )
 
     occurred_at = data.occurred_at or receipt.purchased_at or datetime.now(timezone.utc)
+    is_groceries = sub.role == ROLE_GROCERIES
 
-    if data.category == CATEGORY_SHOPPING:
+    if is_groceries:
         db.flush()
         db.refresh(receipt)
         receipt = get_receipt(db, receipt.id)
@@ -320,7 +351,7 @@ def confirm_receipt(
         receipt.total = data.total
         receipt.currency = data.currency
         receipt.purchased_at = occurred_at
-        receipt.suggested_category = data.category
+        receipt.suggested_category = receipt.suggested_category or "Shopping"
         receipt.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(expense)
@@ -328,7 +359,10 @@ def confirm_receipt(
 
         session_out = shopping_session_service._session_to_out(session)
         item_count = session_out.item_count
-        out = expense_service.expense_to_out(expense, source_item_count=item_count)
+        groceries = subcategory_service.get_subcategory_any(db, expense.subcategory_id)
+        out = expense_service.expense_to_out(
+            expense, subcategory=groceries, source_item_count=item_count
+        )
         hub.broadcast(
             receipt.family_id,
             {
@@ -340,9 +374,10 @@ def confirm_receipt(
             receipt.family_id,
             "expense.created",
             expense,
+            subcategory=groceries,
             source_item_count=item_count,
         )
-        _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
+        _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id), db)
         budget_service.safe_evaluate_budget_alerts(
             db, receipt.family_id, actor_user_id=user.id, occurred_at=occurred_at
         )
@@ -352,7 +387,7 @@ def confirm_receipt(
         family_id=receipt.family_id,
         amount=data.total,
         currency=data.currency,
-        category=data.category,
+        subcategory_id=data.subcategory_id,
         merchant=data.merchant or receipt.merchant,
         note=data.note,
         occurred_at=occurred_at,
@@ -369,21 +404,25 @@ def confirm_receipt(
     receipt.total = data.total
     receipt.currency = data.currency
     receipt.purchased_at = occurred_at
-    receipt.suggested_category = data.category
     receipt.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(expense)
     db.refresh(receipt)
 
     included_count = sum(1 for item in receipt.items if item.is_included)
-    out = expense_service.expense_to_out(expense, source_item_count=included_count or len(data.items))
+    out = expense_service.expense_to_out(
+        expense,
+        subcategory=sub,
+        source_item_count=included_count or len(data.items),
+    )
     expense_service._broadcast(
         receipt.family_id,
         "expense.created",
         expense,
+        subcategory=sub,
         source_item_count=out.source_item_count,
     )
-    _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id))
+    _broadcast(receipt.family_id, "receipt.ready", get_receipt(db, receipt.id), db)
     budget_service.safe_evaluate_budget_alerts(
         db, receipt.family_id, actor_user_id=user.id, occurred_at=occurred_at
     )

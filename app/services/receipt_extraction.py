@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.exceptions import bad_request
-from app.models.expense import EXPENSE_CATEGORIES
+from app.models.budget_group import LEGACY_EXPENSE_CATEGORIES
 
 _MONEY = Decimal("0.01")
 _TOLERANCE = Decimal("0.02")
@@ -37,7 +37,7 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         "total": {"type": "number"},
         "suggested_category": {
             "type": "string",
-            "enum": list(EXPENSE_CATEGORIES),
+            "enum": list(LEGACY_EXPENSE_CATEGORIES),
         },
         "items": {
             "type": "array",
@@ -195,7 +195,7 @@ def extract_receipt(
     ]
 
     category = raw.get("suggested_category") or "Shopping"
-    if category not in EXPENSE_CATEGORIES:
+    if category not in LEGACY_EXPENSE_CATEGORIES:
         category = "Shopping"
 
     return ExtractedReceipt(

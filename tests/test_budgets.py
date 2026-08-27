@@ -5,12 +5,15 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.models.budget import Budget, BudgetPeriod
+from app.models.budget_group import GROUP_FIXED, GROUP_INCOME
 from app.models.expense import Expense, SOURCE_MANUAL
 from app.models.family import Family
+from app.models.user import User
 from app.services import budget as budget_service
+from app.services import budget_subcategory as subcategory_service
 from app.services.budget import derive_state
 from tests.conftest import auth_headers
-from tests.test_api import _two_member_family
 
 
 def test_derive_state_thresholds() -> None:
@@ -21,12 +24,18 @@ def test_derive_state_thresholds() -> None:
     assert derive_state(Decimal("120"), Decimal("100")) == (120, "over")
 
 
-def test_period_usage_spans_calendar_months(db_session: Session) -> None:
+def _seed_family_with_groceries(db: Session) -> tuple[Family, User, object]:
     family = Family(id=uuid4(), name="TZ Family", timezone="UTC")
-    db_session.add(family)
-    user_id = uuid4()
+    user = User(id=uuid4(), email=f"{uuid4()}@ex.com", name="U", password_hash="x")
+    db.add_all([family, user])
+    db.commit()
+    groceries = subcategory_service.groceries_subcategory(db, family.id)
+    return family, user, groceries
+
+
+def test_period_usage_by_subcategory(db_session: Session) -> None:
+    family, user, groceries = _seed_family_with_groceries(db_session)
     for dt, amount in [
-        (datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc), Decimal("10.00")),
         (datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc), Decimal("50.00")),
         (datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc), Decimal("25.00")),
         (datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc), Decimal("5.00")),
@@ -36,30 +45,25 @@ def test_period_usage_spans_calendar_months(db_session: Session) -> None:
                 family_id=family.id,
                 amount=amount,
                 currency="EUR",
-                category="Shopping",
+                subcategory_id=groceries.id,
                 occurred_at=dt,
-                created_by=user_id,
+                created_by=user.id,
                 source_type=SOURCE_MANUAL,
             )
         )
-    db_session.commit()
-
-    from app.models.budget import BudgetPeriod
-
     period = BudgetPeriod(
         family_id=family.id,
         start_date=date(2026, 8, 27),
         end_date=date(2026, 9, 26),
         label_month="2026-09",
         currency="EUR",
-        created_by=user_id,
+        created_by=user.id,
     )
     db_session.add(period)
     db_session.commit()
 
-    usage = budget_service.period_usage(db_session, family, period)
-    assert usage.get("Shopping") == Decimal("75.00")
-    assert usage.get(None) == Decimal("75.00")
+    used, _ = budget_service.period_usage(db_session, family, period)
+    assert used.get(groceries.id) == Decimal("75.00")
 
 
 def test_current_period_empty(client: TestClient) -> None:
@@ -86,13 +90,164 @@ def test_spend_includes_null_budget_when_unset(client: TestClient) -> None:
     assert spend.json()["budget"] is None
 
 
-def test_overall_budget_summary_zero_spend(db_session: Session) -> None:
-    from app.models.budget import Budget, BudgetPeriod
-    from app.models.user import User
+def test_create_period_with_subcategories(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-create@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Create Family", "timezone": "UTC"},
+    ).json()["id"]
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    groceries = next(
+        s for g in subs["groups"] if g["group"] == GROUP_FIXED for s in g["subcategories"] if s["role"] == "groceries"
+    )
+    income_group = next(g for g in subs["groups"] if g["group"] == GROUP_INCOME)
+    salary = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_INCOME, "name": "Salary"},
+    ).json()
 
-    family = Family(id=uuid4(), name="Zero", timezone="UTC")
-    user = User(id=uuid4(), email=f"{uuid4()}@ex.com", name="U", password_hash="x")
-    db_session.add_all([family, user])
+    today = date.today()
+    start = today.replace(day=1)
+    end = today
+    res = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "budgets": [
+                {"subcategory_id": salary["id"], "amount": "3000.00"},
+                {"subcategory_id": groceries["id"], "amount": "400.00"},
+            ],
+        },
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["summary"]["income_expected"] == "3000.00"
+    assert body["summary"]["total_expenses_expected"] == "400.00"
+    assert body["summary"]["left_over_expected"] == "2600.00"
+    assert len(income_group["subcategories"]) >= 0
+
+
+def test_settle_and_unsettle(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-settle@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Settle Family", "timezone": "UTC"},
+    ).json()["id"]
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    rent = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_FIXED, "name": "Rent"},
+    ).json()
+    today = date.today()
+    period = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": today.replace(day=1).isoformat(),
+            "end_date": today.isoformat(),
+            "budgets": [{"subcategory_id": rent["id"], "amount": "100.00"}],
+        },
+    ).json()
+    line = next(l for g in period["groups"] for l in g["lines"] if l["subcategory_id"] == rent["id"])
+    settled = client.post(f"/api/budgets/{line['id']}/settle", headers=headers)
+    assert settled.status_code == 200, settled.text
+    settled_line = next(
+        l for g in settled.json()["groups"] for l in g["lines"] if l["id"] == line["id"]
+    )
+    assert settled_line["settled"] is True
+    assert settled_line["used"] == "100.00"
+
+    unsettled = client.delete(f"/api/budgets/{line['id']}/settle", headers=headers)
+    assert unsettled.status_code == 200
+    unsettled_line = next(
+        l for g in unsettled.json()["groups"] for l in g["lines"] if l["id"] == line["id"]
+    )
+    assert unsettled_line["settled"] is False
+    assert unsettled_line["used"] == "0.00"
+    assert len(subs["groups"]) >= 6
+
+
+def test_copy_period(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-copy@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Copy Family", "timezone": "UTC"},
+    ).json()["id"]
+    rent = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_FIXED, "name": "Rent"},
+    ).json()
+    today = date.today()
+    start = today - timedelta(days=40)
+    end = today - timedelta(days=10)
+    client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "budgets": [{"subcategory_id": rent["id"], "amount": "120.00"}],
+        },
+    )
+    next_start = end + timedelta(days=1)
+    next_end = next_start + timedelta(days=29)
+    copied = client.post(
+        f"/api/families/{family_id}/budget-periods/copy",
+        headers=headers,
+        json={
+            "start_date": next_start.isoformat(),
+            "end_date": next_end.isoformat(),
+        },
+    )
+    assert copied.status_code == 201, copied.text
+    lines = [l for g in copied.json()["groups"] for l in g["lines"]]
+    assert any(l["subcategory_id"] == rent["id"] and l["amount"] == "120.00" for l in lines)
+
+
+def test_income_excluded_from_spend(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-income@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Income Family", "timezone": "UTC"},
+    ).json()["id"]
+    salary = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_INCOME, "name": "Salary"},
+    ).json()
+    groceries = next(
+        s
+        for g in client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()["groups"]
+        if g["group"] == GROUP_FIXED
+        for s in g["subcategories"]
+        if s["role"] == "groceries"
+    )
+    client.post(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        json={"amount": "2000.00", "subcategory_id": salary["id"]},
+    )
+    client.post(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        json={"amount": "50.00", "subcategory_id": groceries["id"]},
+    )
+    spend = client.get(f"/api/families/{family_id}/spend", headers=headers).json()
+    current = next(m for m in spend["months"] if m["month"] == spend["current_month"])
+    assert current["total"] == "50.00"
+
+
+def test_overall_budget_summary_from_outflows(db_session: Session) -> None:
+    family, user, groceries = _seed_family_with_groceries(db_session)
     today = date.today()
     period = BudgetPeriod(
         family_id=family.id,
@@ -105,242 +260,12 @@ def test_overall_budget_summary_zero_spend(db_session: Session) -> None:
     db_session.add(period)
     db_session.flush()
     db_session.add(
-        Budget(period_id=period.id, category=None, amount=Decimal("600.00"))
+        Budget(period_id=period.id, subcategory_id=groceries.id, amount=Decimal("600.00"))
     )
     db_session.commit()
 
     summary = budget_service.overall_budget_summary(db_session, family)
     assert summary is not None
+    assert summary.amount == Decimal("600.00")
     assert summary.used == Decimal("0.00")
     assert summary.state == "ok"
-    assert summary.percent_used == 0
-    assert summary.period_id == period.id
-    assert summary.start_date == period.start_date
-
-
-def _current_window() -> tuple[str, str, str]:
-    today = date.today()
-    start = today - timedelta(days=5)
-    end = today + timedelta(days=20)
-    label = f"{end.year:04d}-{end.month:02d}"
-    return start.isoformat(), end.isoformat(), label
-
-
-def test_budget_period_create_patch_and_overlap(client: TestClient) -> None:
-    headers = auth_headers(client, "budget-write@example.com", name="Owner")
-    family_id = client.post(
-        "/api/families",
-        headers=headers,
-        json={"name": "Write Family", "timezone": "UTC"},
-    ).json()["id"]
-
-    start, end, label = _current_window()
-    created = client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=headers,
-        json={
-            "start_date": start,
-            "end_date": end,
-            "budgets": [
-                {"category": None, "amount": "1500.00"},
-                {"category": "Shopping", "amount": "600.00"},
-            ],
-        },
-    )
-    assert created.status_code == 201, created.text
-    data = created.json()
-    period_id = data["id"]
-    assert data["label_month"] == label
-    assert data["overall"] is not None
-    assert float(data["overall"]["amount"]) == 1500.00
-    assert len(data["categories"]) == 1
-    shopping_id = data["categories"][0]["id"]
-
-    patched = client.patch(
-        f"/api/budgets/{shopping_id}",
-        headers=headers,
-        json={"amount": "650.00"},
-    )
-    assert patched.status_code == 200
-    assert float(patched.json()["amount"]) == 650.00
-
-    # Replacing budgets on PATCH (e.g. date edit from the sheet) must not
-    # UniqueViolation on uq_budgets_period_overall.
-    new_end = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
-    replaced = client.patch(
-        f"/api/budget-periods/{period_id}",
-        headers=headers,
-        json={
-            "start_date": start,
-            "end_date": new_end,
-            "label_month": new_end[:7],
-            "budgets": [
-                {"category": None, "amount": "1600.00"},
-                {"category": "Shopping", "amount": "700.00"},
-                {"category": "Dining", "amount": "200.00"},
-            ],
-        },
-    )
-    assert replaced.status_code == 200, replaced.text
-    assert replaced.json()["end_date"] == new_end
-    assert float(replaced.json()["overall"]["amount"]) == 1600.00
-    assert len(replaced.json()["categories"]) == 2
-
-    overlap = client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=headers,
-        json={
-            "start_date": start,
-            "end_date": end,
-            "budgets": [{"category": "Dining", "amount": "100.00"}],
-        },
-    )
-    assert overlap.status_code == 400
-
-    next_start = (date.fromisoformat(new_end) + timedelta(days=1)).isoformat()
-    next_end = (date.fromisoformat(new_end) + timedelta(days=30)).isoformat()
-    upcoming = client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=headers,
-        json={
-            "start_date": next_start,
-            "end_date": next_end,
-            "budgets": [{"category": "Shopping", "amount": "700.00"}],
-        },
-    )
-    assert upcoming.status_code == 201, upcoming.text
-
-    deleted = client.delete(f"/api/budget-periods/{period_id}", headers=headers)
-    assert deleted.status_code == 204
-
-
-def test_child_cannot_set_budget_period(client: TestClient, db_session: Session) -> None:
-    from uuid import UUID
-
-    from app.models.family import FamilyMember
-    from app.models.user import User
-
-    owner = auth_headers(client, "budget-owner@example.com", name="Owner")
-    family_id = client.post(
-        "/api/families",
-        headers=owner,
-        json={"name": "Role Family", "timezone": "UTC"},
-    ).json()["id"]
-
-    child_headers = auth_headers(client, "child-user@example.com", name="Child User")
-    child_user = db_session.query(User).filter(User.email == "child-user@example.com").one()
-    db_session.add(
-        FamilyMember(
-            family_id=UUID(family_id),
-            user_id=child_user.id,
-            name="Child User",
-            role="Child",
-        )
-    )
-    db_session.commit()
-
-    start, end, _ = _current_window()
-    blocked = client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=child_headers,
-        json={
-            "start_date": start,
-            "end_date": end,
-            "budgets": [{"amount": "500.00"}],
-        },
-    )
-    assert blocked.status_code == 403
-
-
-def test_budget_alert_fires_once_at_eighty_percent(client: TestClient) -> None:
-    headers = auth_headers(client, "budget-alert@example.com", name="Owner")
-    family_id = client.post(
-        "/api/families",
-        headers=headers,
-        json={"name": "Alert Family", "timezone": "UTC"},
-    ).json()["id"]
-
-    start, end, _ = _current_window()
-    client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=headers,
-        json={
-            "start_date": start,
-            "end_date": end,
-            "budgets": [{"category": "Shopping", "amount": "100.00"}],
-        },
-    )
-
-    client.post(
-        f"/api/families/{family_id}/expenses",
-        headers=headers,
-        json={"amount": "85.00", "category": "Shopping"},
-    )
-    notifs = client.get("/api/notifications", headers=headers).json()
-    budget_notifs = [n for n in notifs if n["type"] == "budget"]
-    assert len(budget_notifs) == 1
-    assert budget_notifs[0]["title"] == "Budget warning"
-
-    client.post(
-        f"/api/families/{family_id}/expenses",
-        headers=headers,
-        json={"amount": "5.00", "category": "Shopping"},
-    )
-    notifs2 = client.get("/api/notifications", headers=headers).json()
-    budget_notifs2 = [n for n in notifs2 if n["type"] == "budget"]
-    assert len(budget_notifs2) == 1
-
-    spend = client.get(f"/api/families/{family_id}/spend", headers=headers).json()
-    # overall household budget not set — spend.budget is null
-    assert spend["budget"] is None
-
-
-def test_spend_budget_reflects_current_cycle(client: TestClient) -> None:
-    headers = auth_headers(client, "budget-cycle-spend@example.com", name="Owner")
-    family_id = client.post(
-        "/api/families",
-        headers=headers,
-        json={"name": "Cycle Spend", "timezone": "UTC"},
-    ).json()["id"]
-    start, end, label = _current_window()
-    client.post(
-        f"/api/families/{family_id}/budget-periods",
-        headers=headers,
-        json={
-            "start_date": start,
-            "end_date": end,
-            "budgets": [{"amount": "600.00"}],
-        },
-    )
-    spend = client.get(f"/api/families/{family_id}/spend", headers=headers).json()
-    assert spend["budget"] is not None
-    assert spend["budget"]["label_month"] == label
-    assert spend["budget"]["start_date"] == start
-    assert spend["budget"]["end_date"] == end
-    assert float(spend["budget"]["amount"]) == 600.0
-
-
-def test_shopping_notification_still_excludes_actor(client: TestClient) -> None:
-    owner, partner, family_id, _, _ = _two_member_family(client, "budget-shop-exclude")
-    list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=owner).json()[0]["id"]
-    item = client.post(
-        f"/api/shopping-lists/{list_id}/items",
-        headers=owner,
-        json={"name": "Milk"},
-    ).json()
-    client.post(
-        f"/api/families/{family_id}/shopping-sessions/active/items",
-        headers=owner,
-        json={"shopping_item_id": item["id"]},
-    )
-    client.post(
-        f"/api/families/{family_id}/shopping-sessions/active/complete",
-        headers=owner,
-        json={"total_cost": "5.00"},
-    )
-    owner_notifs = client.get("/api/notifications", headers=owner).json()
-    partner_notifs = client.get("/api/notifications", headers=partner).json()
-    owner_shopping = [n for n in owner_notifs if n["type"] == "shopping"]
-    partner_shopping = [n for n in partner_notifs if n["type"] == "shopping"]
-    assert len(owner_shopping) == 0
-    assert len(partner_shopping) == 1

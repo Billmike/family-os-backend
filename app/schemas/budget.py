@@ -1,29 +1,17 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, get_args
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.models.expense import EXPENSE_CATEGORIES
 from app.schemas.auth import ORMModel
-
-BudgetCategory = Literal[
-    "Shopping",
-    "Transportation",
-    "Housing",
-    "Utilities",
-    "Dining",
-    "Health",
-    "Childcare",
-    "Other",
-]
 
 BudgetState = Literal["ok", "warning", "over"]
 
 
 class BudgetLineIn(BaseModel):
-    category: BudgetCategory | None = None
+    subcategory_id: UUID
     amount: Decimal = Field(gt=0)
 
 
@@ -53,6 +41,19 @@ class BudgetPeriodUpdate(BaseModel):
     budgets: list[BudgetLineIn] | None = None
 
 
+class BudgetPeriodCopy(BaseModel):
+    start_date: date
+    end_date: date
+    label_month: str | None = None
+    source_period_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "BudgetPeriodCopy":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
+
+
 class BudgetUpdate(BaseModel):
     amount: Decimal = Field(gt=0)
 
@@ -61,15 +62,36 @@ class BudgetOut(ORMModel):
     id: UUID
     period_id: UUID
     family_id: UUID
-    category: str | None
+    subcategory_id: UUID
+    subcategory_name: str
+    group: str
     amount: Decimal
     currency: str
     used: Decimal
     remaining: Decimal
     percent_used: int
     state: BudgetState
+    settled: bool
+    settlement_expense_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class BudgetGroupOut(BaseModel):
+    group: str
+    direction: str
+    expected: Decimal
+    actual: Decimal
+    lines: list[BudgetOut]
+
+
+class BudgetPeriodSummaryOut(BaseModel):
+    income_expected: Decimal
+    income_actual: Decimal
+    total_expenses_expected: Decimal
+    total_expenses_actual: Decimal
+    left_over_expected: Decimal
+    left_over_actual: Decimal
 
 
 class BudgetPeriodOut(BaseModel):
@@ -79,8 +101,8 @@ class BudgetPeriodOut(BaseModel):
     end_date: date
     label_month: str
     currency: str
-    overall: BudgetOut | None
-    categories: list[BudgetOut]
+    groups: list[BudgetGroupOut]
+    summary: BudgetPeriodSummaryOut
     created_at: datetime
     updated_at: datetime
 
@@ -101,4 +123,17 @@ class BudgetSummaryOut(BaseModel):
     state: BudgetState
 
 
-assert set(EXPENSE_CATEGORIES) == set(get_args(BudgetCategory))
+class BudgetInsightsMonthOut(BaseModel):
+    month: str
+    income_expected: Decimal
+    income_actual: Decimal
+    outflow_expected: Decimal
+    outflow_actual: Decimal
+    net_expected: Decimal
+    net_actual: Decimal
+    groups: list[BudgetGroupOut]
+
+
+class BudgetInsightsOut(BaseModel):
+    currency: str
+    months: list[BudgetInsightsMonthOut]

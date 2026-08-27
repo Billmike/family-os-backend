@@ -8,7 +8,9 @@ from app.core.deps import get_current_user, get_membership, require_family_membe
 from app.models.family import FamilyMember
 from app.models.user import User
 from app.schemas.budget import (
+    BudgetInsightsOut,
     BudgetOut,
+    BudgetPeriodCopy,
     BudgetPeriodCreate,
     BudgetPeriodListOut,
     BudgetPeriodOut,
@@ -59,6 +61,36 @@ def create_budget_period(
 ) -> BudgetPeriodOut:
     family = family_service.get_family(db, family_id)
     return budget_service.create_period(db, family, user, data)
+
+
+@router.post(
+    "/api/families/{family_id}/budget-periods/copy",
+    response_model=BudgetPeriodOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def copy_budget_period(
+    family_id: UUID,
+    data: BudgetPeriodCopy,
+    user: User = Depends(get_current_user),
+    _: FamilyMember = Depends(require_parent_or_owner),
+    db: Session = Depends(get_db),
+) -> BudgetPeriodOut:
+    family = family_service.get_family(db, family_id)
+    return budget_service.copy_period(db, family, user, data)
+
+
+@router.get(
+    "/api/families/{family_id}/budget-insights",
+    response_model=BudgetInsightsOut,
+)
+def get_budget_insights(
+    family_id: UUID,
+    months: int = Query(default=12, ge=1, le=36),
+    _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
+) -> BudgetInsightsOut:
+    family = family_service.get_family(db, family_id)
+    return budget_service.get_insights(db, family, months=months)
 
 
 @router.patch("/api/budget-periods/{period_id}", response_model=BudgetPeriodOut)
@@ -113,3 +145,31 @@ def delete_budget(
     member = get_membership(db, period.family_id, user.id)
     require_parent_or_owner(member)
     budget_service.delete_budget(db, budget)
+
+
+@router.post("/api/budgets/{budget_id}/settle", response_model=BudgetPeriodOut)
+def settle_budget(
+    budget_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> BudgetPeriodOut:
+    budget = budget_service.get_budget(db, budget_id)
+    period = budget_service.get_period(db, budget.period_id)
+    member = get_membership(db, period.family_id, user.id)
+    require_parent_or_owner(member)
+    family = family_service.get_family(db, period.family_id)
+    return budget_service.settle_budget(db, family, user, budget)
+
+
+@router.delete("/api/budgets/{budget_id}/settle", response_model=BudgetPeriodOut)
+def unsettle_budget(
+    budget_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> BudgetPeriodOut:
+    budget = budget_service.get_budget(db, budget_id)
+    period = budget_service.get_period(db, budget.period_id)
+    member = get_membership(db, period.family_id, user.id)
+    require_parent_or_owner(member)
+    family = family_service.get_family(db, period.family_id)
+    return budget_service.unsettle_budget(db, family, budget)

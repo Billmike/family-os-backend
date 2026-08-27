@@ -302,12 +302,13 @@ def test_upload_extracts_and_confirm(client: TestClient, receipt_env: Path) -> N
     assert float(data["total"]) == 52.10
     assert len(data["items"]) == 3
     assert data["suggested_category"] == "Shopping"
+    assert data.get("suggested_subcategory_id") is not None
 
     confirm = client.post(
         f"/api/receipts/{receipt_id}/confirm",
         headers=headers,
         json={
-            "category": "Shopping",
+            "subcategory_id": data["suggested_subcategory_id"],
             "merchant": "REWE",
             "total": "52.10",
             "currency": "EUR",
@@ -334,7 +335,7 @@ def test_upload_extracts_and_confirm(client: TestClient, receipt_env: Path) -> N
     assert expense["source_id"] != receipt_id
     assert float(expense["amount"]) == 52.10
     assert expense["source_item_count"] == 3
-    assert expense["category"] == "Shopping"
+    assert expense["subcategory_name"] == "Groceries"
     assert expense["merchant"] == "REWE"
     assert expense["note"] == "Weekly shop"
 
@@ -350,7 +351,7 @@ def test_upload_extracts_and_confirm(client: TestClient, receipt_env: Path) -> N
         f"/api/receipts/{receipt_id}/confirm",
         headers=headers,
         json={
-            "category": "Shopping",
+            "subcategory_id": data["suggested_subcategory_id"],
             "merchant": "REWE",
             "total": "52.10",
             "currency": "EUR",
@@ -382,12 +383,16 @@ def test_confirm_non_shopping_receipt_stays_receipt_source(
     upload = _upload(client, headers, family_id)
     receipt_id = upload.json()["id"]
     polled = client.get(f"/api/receipts/{receipt_id}", headers=headers).json()
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    transport = next(
+        s for g in subs["groups"] if g["group"] == "Fixed Expense" for s in g["subcategories"] if s["name"] == "Transport"
+    )
 
     confirm = client.post(
         f"/api/receipts/{receipt_id}/confirm",
         headers=headers,
         json={
-            "category": "Transportation",
+            "subcategory_id": transport["id"],
             "merchant": "REWE",
             "total": "52.10",
             "currency": "EUR",
@@ -410,7 +415,7 @@ def test_confirm_non_shopping_receipt_stays_receipt_source(
     expense = confirm.json()
     assert expense["source_type"] == "receipt"
     assert expense["source_id"] == receipt_id
-    assert expense["category"] == "Transportation"
+    assert expense["subcategory_name"] == "Transport"
 
     linked = client.get(f"/api/receipts/{receipt_id}", headers=headers).json()
     assert linked["shopping_session_id"] is None

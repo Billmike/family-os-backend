@@ -5,9 +5,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.expense import EXPENSE_CATEGORIES
+from app.models.budget_group import LEGACY_EXPENSE_CATEGORIES
 from app.schemas.auth import ORMModel
-from app.schemas.expense import ExpenseCategory, _blank_to_none
+from app.schemas.expense import _blank_to_none
 
 ReceiptStatus = Literal["processing", "ready", "failed", "confirmed"]
 
@@ -43,6 +43,7 @@ class ReceiptOut(ORMModel):
     original_filename: str | None
     category_hint: str | None
     suggested_category: str | None
+    suggested_subcategory_id: UUID | None = None
     merchant: str | None
     purchased_at: datetime | None
     currency: str | None
@@ -78,7 +79,7 @@ class ReceiptItemInput(BaseModel):
 
 
 class ReceiptConfirm(BaseModel):
-    category: ExpenseCategory
+    subcategory_id: UUID
     merchant: str | None = Field(default=None, max_length=MAX_MERCHANT)
     note: str | None = Field(default=None, max_length=MAX_NOTE)
     occurred_at: datetime | None = None
@@ -97,7 +98,7 @@ class ReceiptConfirm(BaseModel):
         return value.strip().upper()
 
 
-assert set(EXPENSE_CATEGORIES) == {
+assert set(LEGACY_EXPENSE_CATEGORIES) == {
     "Shopping",
     "Transportation",
     "Housing",

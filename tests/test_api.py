@@ -1342,7 +1342,8 @@ def test_complete_session_creates_shopping_expense(client: TestClient) -> None:
     assert rows.status_code == 200
     data = rows.json()
     assert len(data) == 1
-    assert data[0]["category"] == "Shopping"
+    assert data[0]["subcategory_name"] == "Groceries"
+    assert data[0]["group"] == "Fixed Expense"
     assert data[0]["source_type"] == "shopping_session"
     assert data[0]["source_id"] == trip["id"]
     assert float(data[0]["amount"]) == 12.40
@@ -1369,12 +1370,20 @@ def test_manual_expense_crud_and_spend_breakdown(client: TestClient) -> None:
     list_id = client.get(f"/api/families/{family_id}/shopping-lists", headers=headers).json()[0]["id"]
     _add_and_complete_trip(client, headers, family_id, list_id, "Bread", "10.00")
 
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    transport = next(
+        s for g in subs["groups"] if g["group"] == "Fixed Expense" for s in g["subcategories"] if s["name"] == "Transport"
+    )
+    groceries = next(
+        s for g in subs["groups"] for s in g["subcategories"] if s["role"] == "groceries"
+    )
+
     created = client.post(
         f"/api/families/{family_id}/expenses",
         headers=headers,
         json={
             "amount": "89.00",
-            "category": "Transportation",
+            "subcategory_id": transport["id"],
             "merchant": "Miles Berlin",
             "note": "Weekend car rental",
         },
@@ -1383,7 +1392,8 @@ def test_manual_expense_crud_and_spend_breakdown(client: TestClient) -> None:
     expense = created.json()
     assert expense["merchant"] == "Miles Berlin"
     assert expense["source_type"] == "manual"
-    assert expense["category"] == "Transportation"
+    assert expense["subcategory_id"] == transport["id"]
+    assert expense["subcategory_name"] == "Transport"
 
     spend = client.get(f"/api/families/{family_id}/spend?months=3", headers=headers)
     assert spend.status_code == 200
@@ -1391,10 +1401,11 @@ def test_manual_expense_crud_and_spend_breakdown(client: TestClient) -> None:
     assert float(current["total"]) == 99.00
     assert current["entry_count"] == 2
     by_cat = {row["category"]: row for row in current["categories"]}
-    assert float(by_cat["Shopping"]["total"]) == 10.00
-    assert by_cat["Shopping"]["count"] == 1
-    assert float(by_cat["Transportation"]["total"]) == 89.00
-    assert by_cat["Transportation"]["count"] == 1
+    assert float(by_cat["Fixed Expense · Groceries"]["total"]) == 10.00
+    assert by_cat["Fixed Expense · Groceries"]["count"] == 1
+    assert float(by_cat["Fixed Expense · Transport"]["total"]) == 89.00
+    assert by_cat["Fixed Expense · Transport"]["count"] == 1
+    assert groceries["id"]
 
     grocery_only = client.get(f"/api/families/{family_id}/shopping-spend?months=3", headers=headers)
     assert grocery_only.status_code == 200

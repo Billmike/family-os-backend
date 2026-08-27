@@ -18,8 +18,10 @@ from app.core.timeutil import (
     parse_year_month,
 )
 from app.services import budget as budget_service
+from app.services import budget_subcategory as subcategory_service
+from app.models.budget_group import GROUP_DIRECTIONS, OUTFLOW_GROUPS, is_outflow_group
+from app.models.budget_subcategory import BudgetSubcategory
 from app.models.expense import (
-    CATEGORY_SHOPPING,
     SOURCE_MANUAL,
     SOURCE_RECEIPT,
     SOURCE_SHOPPING_SESSION,
@@ -39,7 +41,6 @@ from app.schemas.expense import (
     MonthlyHouseholdSpendOut,
 )
 
-_MONEY = Decimal("0.01")
 _ZERO = Decimal("0.00")
 
 
@@ -81,13 +82,29 @@ def _source_item_counts(db: Session, expenses: list[Expense]) -> dict[UUID, int]
     return counts
 
 
-def expense_to_out(expense: Expense, *, source_item_count: int | None = None) -> ExpenseOut:
+def _subcategories_map(db: Session, expenses: list[Expense]) -> dict[UUID, BudgetSubcategory]:
+    ids = {e.subcategory_id for e in expenses}
+    if not ids:
+        return {}
+    rows = db.query(BudgetSubcategory).filter(BudgetSubcategory.id.in_(ids)).all()
+    return {row.id: row for row in rows}
+
+
+def expense_to_out(
+    expense: Expense,
+    *,
+    subcategory: BudgetSubcategory,
+    source_item_count: int | None = None,
+) -> ExpenseOut:
     return ExpenseOut(
         id=expense.id,
         family_id=expense.family_id,
         amount=_as_money(expense.amount),
         currency=expense.currency,
-        category=expense.category,
+        subcategory_id=expense.subcategory_id,
+        subcategory_name=subcategory.name,
+        group=subcategory.group,
+        direction=GROUP_DIRECTIONS.get(subcategory.group, "outflow"),
         merchant=expense.merchant,
         note=expense.note,
         occurred_at=expense.occurred_at,
@@ -100,12 +117,21 @@ def expense_to_out(expense: Expense, *, source_item_count: int | None = None) ->
     )
 
 
-def _broadcast(family_id: UUID, event_type: str, expense: Expense, *, source_item_count: int | None) -> None:
+def _broadcast(
+    family_id: UUID,
+    event_type: str,
+    expense: Expense,
+    *,
+    subcategory: BudgetSubcategory,
+    source_item_count: int | None,
+) -> None:
     hub.broadcast(
         family_id,
         {
             "type": event_type,
-            "expense": expense_to_out(expense, source_item_count=source_item_count).model_dump(mode="json"),
+            "expense": expense_to_out(
+                expense, subcategory=subcategory, source_item_count=source_item_count
+            ).model_dump(mode="json"),
         },
     )
 
@@ -143,12 +169,13 @@ def record_shopping_session_expense(
         return existing
     if session.total_cost is None:
         raise bad_request("Shopping session has no total cost")
+    groceries = subcategory_service.groceries_subcategory(db, session.family_id)
     occurred_at = session.completed_at or datetime.now(timezone.utc)
     expense = Expense(
         family_id=session.family_id,
         amount=session.total_cost,
         currency=session.currency or "EUR",
-        category=CATEGORY_SHOPPING,
+        subcategory_id=groceries.id,
         merchant=None,
         note=None,
         occurred_at=occurred_at,
@@ -161,12 +188,15 @@ def record_shopping_session_expense(
 
 
 def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate) -> ExpenseOut:
+    sub = subcategory_service.get_subcategory(db, data.subcategory_id)
+    if sub.family_id != family.id:
+        raise bad_request("Invalid budget subcategory")
     occurred_at = data.occurred_at or datetime.now(timezone.utc)
     expense = Expense(
         family_id=family.id,
         amount=data.amount,
         currency=data.currency,
-        category=data.category,
+        subcategory_id=data.subcategory_id,
         merchant=data.merchant,
         note=data.note,
         occurred_at=occurred_at,
@@ -177,11 +207,12 @@ def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate)
     db.add(expense)
     db.commit()
     db.refresh(expense)
-    out = expense_to_out(expense, source_item_count=None)
-    _broadcast(family.id, "expense.created", expense, source_item_count=None)
-    budget_service.safe_evaluate_budget_alerts(
-        db, family.id, actor_user_id=user.id, occurred_at=expense.occurred_at
-    )
+    out = expense_to_out(expense, subcategory=sub, source_item_count=None)
+    _broadcast(family.id, "expense.created", expense, subcategory=sub, source_item_count=None)
+    if is_outflow_group(sub.group):
+        budget_service.safe_evaluate_budget_alerts(
+            db, family.id, actor_user_id=user.id, occurred_at=expense.occurred_at
+        )
     return out
 
 
@@ -207,13 +238,20 @@ def list_expenses(
         .all()
     )
     counts = _source_item_counts(db, rows)
-    return [
-        expense_to_out(
-            expense,
-            source_item_count=counts.get(expense.source_id) if expense.source_id else None,
+    subcats = _subcategories_map(db, rows)
+    result: list[ExpenseOut] = []
+    for expense in rows:
+        sub = subcats.get(expense.subcategory_id)
+        if sub is None:
+            continue
+        result.append(
+            expense_to_out(
+                expense,
+                subcategory=sub,
+                source_item_count=counts.get(expense.source_id) if expense.source_id else None,
+            )
         )
-        for expense in rows
-    ]
+    return result
 
 
 def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> ExpenseOut:
@@ -221,8 +259,11 @@ def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> Expens
     fields = data.model_fields_set
     if "amount" in fields and data.amount is not None:
         expense.amount = data.amount
-    if "category" in fields and data.category is not None:
-        expense.category = data.category
+    if "subcategory_id" in fields and data.subcategory_id is not None:
+        sub = subcategory_service.get_subcategory(db, data.subcategory_id)
+        if sub.family_id != expense.family_id:
+            raise bad_request("Invalid budget subcategory")
+        expense.subcategory_id = data.subcategory_id
     if "merchant" in fields:
         expense.merchant = data.merchant
     if "note" in fields:
@@ -234,12 +275,14 @@ def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> Expens
     db.refresh(expense)
     counts = _source_item_counts(db, [expense])
     count = counts.get(expense.source_id) if expense.source_id else None
-    out = expense_to_out(expense, source_item_count=count)
-    _broadcast(expense.family_id, "expense.updated", expense, source_item_count=count)
+    sub = subcategory_service.get_subcategory_any(db, expense.subcategory_id)
+    out = expense_to_out(expense, subcategory=sub, source_item_count=count)
+    _broadcast(expense.family_id, "expense.updated", expense, subcategory=sub, source_item_count=count)
     budget_service.safe_recover_budget_alerts(db, expense.family_id, occurred_at=expense.occurred_at)
-    budget_service.safe_evaluate_budget_alerts(
-        db, expense.family_id, actor_user_id=expense.created_by, occurred_at=expense.occurred_at
-    )
+    if is_outflow_group(sub.group):
+        budget_service.safe_evaluate_budget_alerts(
+            db, expense.family_id, actor_user_id=expense.created_by, occurred_at=expense.occurred_at
+        )
     return out
 
 
@@ -266,8 +309,10 @@ def get_spend(
     family: Family,
     *,
     months: int = 12,
-    category: str | None = None,
+    subcategory_id: UUID | None = None,
+    groceries_only: bool = False,
 ) -> HouseholdSpendOut:
+    """Aggregate outflow ledger entries. Income is excluded from spend charts."""
     now = family_now(family.timezone)
     current_month = f"{now.year:04d}-{now.month:02d}"
     window_keys: list[str] = []
@@ -280,30 +325,42 @@ def get_spend(
     year_start, _ = month_bounds(family.timezone, now.year, 1)
     query_start = window_start if window_start <= year_start else year_start
 
-    query = db.query(Expense).filter(
-        Expense.family_id == family.id,
-        Expense.occurred_at >= query_start,
+    query = (
+        db.query(Expense, BudgetSubcategory)
+        .join(BudgetSubcategory, BudgetSubcategory.id == Expense.subcategory_id)
+        .filter(
+            Expense.family_id == family.id,
+            Expense.occurred_at >= query_start,
+            BudgetSubcategory.group.in_(OUTFLOW_GROUPS),
+        )
     )
-    if category is not None:
-        query = query.filter(Expense.category == category)
-    expenses = query.all()
+    if subcategory_id is not None:
+        query = query.filter(Expense.subcategory_id == subcategory_id)
+    if groceries_only:
+        groceries = subcategory_service.groceries_subcategory(db, family.id)
+        query = query.filter(Expense.subcategory_id == groceries.id)
+
+    pairs = query.all()
 
     totals: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     counts: dict[str, int] = defaultdict(int)
     category_totals: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: _ZERO))
     category_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    category_meta: dict[str, tuple[UUID, str]] = {}
     year_to_date = _ZERO
     currency = "EUR"
     latest_at: datetime | None = None
 
-    for expense in expenses:
+    for expense, sub in pairs:
         key = month_key(expense.occurred_at, family.timezone)
         cost = _as_money(expense.amount)
+        label = f"{sub.group} · {sub.name}"
+        category_meta[label] = (sub.id, sub.group)
         if key in window_keys:
             totals[key] += cost
             counts[key] += 1
-            category_totals[key][expense.category] += cost
-            category_counts[key][expense.category] += 1
+            category_totals[key][label] += cost
+            category_counts[key][label] += 1
         if key.startswith(f"{now.year:04d}-"):
             year_to_date += cost
         occurred = ensure_aware(expense.occurred_at)
@@ -319,6 +376,8 @@ def get_spend(
         cats = [
             CategorySpendOut(
                 category=name,
+                subcategory_id=category_meta[name][0],
+                group=category_meta[name][1],
                 total=_as_money(cat_total),
                 count=category_counts[key][name],
             )

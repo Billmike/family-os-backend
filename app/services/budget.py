@@ -17,17 +17,31 @@ from app.core.timeutil import (
     period_bounds,
 )
 from app.models.budget import Budget, BudgetAlert, BudgetPeriod
-from app.models.expense import Expense
+from app.models.budget_group import (
+    BUDGET_GROUPS,
+    GROUP_DIRECTIONS,
+    GROUP_INCOME,
+    OUTFLOW_GROUPS,
+    is_inflow_group,
+)
+from app.models.budget_subcategory import BudgetSubcategory
+from app.models.expense import SOURCE_BUDGET_LINE, Expense
 from app.models.family import Family
 from app.models.user import User, utcnow
 from app.realtime.hub import hub
+from app.services import budget_subcategory as subcategory_service
 from app.services import notifications as notification_service
 from app.schemas.budget import (
+    BudgetGroupOut,
+    BudgetInsightsMonthOut,
+    BudgetInsightsOut,
     BudgetLineIn,
     BudgetOut,
+    BudgetPeriodCopy,
     BudgetPeriodCreate,
     BudgetPeriodListOut,
     BudgetPeriodOut,
+    BudgetPeriodSummaryOut,
     BudgetPeriodUpdate,
     BudgetState,
     BudgetSummaryOut,
@@ -41,23 +55,38 @@ THRESHOLD_OVER = 100
 _ZERO = Decimal("0.00")
 
 
-def period_usage(db: Session, family: Family, period: BudgetPeriod) -> dict[str | None, Decimal]:
-    """Return {category: total} for the period, plus None key for overall total."""
+def period_usage(
+    db: Session,
+    family: Family,
+    period: BudgetPeriod,
+) -> tuple[dict[UUID, Decimal], dict[UUID, UUID]]:
+    """Return (used_by_subcategory_id, settlement_expense_id_by_budget_id)."""
     start, end = period_bounds(family.timezone, period.start_date, period.end_date)
     rows = (
-        db.query(Expense.category, func.sum(Expense.amount))
+        db.query(Expense.subcategory_id, func.sum(Expense.amount))
         .filter(
             Expense.family_id == family.id,
             Expense.occurred_at >= start,
             Expense.occurred_at < end,
         )
-        .group_by(Expense.category)
+        .group_by(Expense.subcategory_id)
         .all()
     )
-    by_category: dict[str | None, Decimal] = {category: as_money(total) for category, total in rows}
-    overall = sum(by_category.values(), _ZERO)
-    by_category[None] = as_money(overall)
-    return by_category
+    used: dict[UUID, Decimal] = {sub_id: as_money(total) for sub_id, total in rows}
+
+    budget_ids = [b.id for b in period.budgets]
+    settlements: dict[UUID, UUID] = {}
+    if budget_ids:
+        settlement_rows = (
+            db.query(Expense.source_id, Expense.id)
+            .filter(
+                Expense.source_type == SOURCE_BUDGET_LINE,
+                Expense.source_id.in_(budget_ids),
+            )
+            .all()
+        )
+        settlements = {source_id: expense_id for source_id, expense_id in settlement_rows if source_id}
+    return used, settlements
 
 
 def derive_state(used: Decimal, amount: Decimal) -> tuple[int, BudgetState]:
@@ -146,12 +175,24 @@ def _assert_no_overlap(
             )
 
 
+def _load_subcategories(
+    db: Session,
+    subcategory_ids: set[UUID],
+) -> dict[UUID, BudgetSubcategory]:
+    if not subcategory_ids:
+        return {}
+    rows = db.query(BudgetSubcategory).filter(BudgetSubcategory.id.in_(subcategory_ids)).all()
+    return {row.id: row for row in rows}
+
+
 def budget_to_out(
     budget: Budget,
     *,
     family_id: UUID,
     currency: str,
     used: Decimal,
+    subcategory: BudgetSubcategory,
+    settlement_expense_id: UUID | None,
 ) -> BudgetOut:
     amount = as_money(budget.amount)
     used_money = as_money(used)
@@ -161,34 +202,113 @@ def budget_to_out(
         id=budget.id,
         period_id=budget.period_id,
         family_id=family_id,
-        category=budget.category,
+        subcategory_id=budget.subcategory_id,
+        subcategory_name=subcategory.name,
+        group=subcategory.group,
         amount=amount,
         currency=currency,
         used=used_money,
         remaining=remaining,
         percent_used=percent_used,
         state=state,
+        settled=settlement_expense_id is not None,
+        settlement_expense_id=settlement_expense_id,
         created_at=budget.created_at,
         updated_at=budget.updated_at,
     )
 
 
+def _empty_summary() -> BudgetPeriodSummaryOut:
+    return BudgetPeriodSummaryOut(
+        income_expected=_ZERO,
+        income_actual=_ZERO,
+        total_expenses_expected=_ZERO,
+        total_expenses_actual=_ZERO,
+        left_over_expected=_ZERO,
+        left_over_actual=_ZERO,
+    )
+
+
 def period_to_out(db: Session, family: Family, period: BudgetPeriod) -> BudgetPeriodOut:
-    usage = period_usage(db, family, period)
-    overall_out: BudgetOut | None = None
-    category_outs: list[BudgetOut] = []
-    for budget in sorted(period.budgets, key=lambda b: (b.category is not None, b.category or "")):
-        used = usage.get(budget.category, _ZERO)
+    used_map, settlements = period_usage(db, family, period)
+    sub_ids = {b.subcategory_id for b in period.budgets}
+    # Also include subcategories that have spend but no budget line
+    sub_ids.update(used_map.keys())
+    subcats = _load_subcategories(db, sub_ids)
+
+    lines_by_group: dict[str, list[BudgetOut]] = {g: [] for g in BUDGET_GROUPS}
+    expected_by_group: dict[str, Decimal] = {g: _ZERO for g in BUDGET_GROUPS}
+    actual_by_group: dict[str, Decimal] = {g: _ZERO for g in BUDGET_GROUPS}
+
+    for budget in period.budgets:
+        sub = subcats.get(budget.subcategory_id)
+        if sub is None:
+            continue
+        used = used_map.get(budget.subcategory_id, _ZERO)
         out = budget_to_out(
             budget,
             family_id=family.id,
             currency=period.currency,
             used=used,
+            subcategory=sub,
+            settlement_expense_id=settlements.get(budget.id),
         )
-        if budget.category is None:
-            overall_out = out
-        else:
-            category_outs.append(out)
+        group = sub.group
+        if group not in lines_by_group:
+            lines_by_group[group] = []
+            expected_by_group[group] = _ZERO
+            actual_by_group[group] = _ZERO
+        lines_by_group[group].append(out)
+        expected_by_group[group] = as_money(expected_by_group[group] + out.amount)
+        actual_by_group[group] = as_money(actual_by_group[group] + used)
+
+    # Actual spend on subcategories with no budget line still rolls into group totals
+    budgeted_sub_ids = {b.subcategory_id for b in period.budgets}
+    for sub_id, used in used_map.items():
+        if sub_id in budgeted_sub_ids:
+            continue
+        sub = subcats.get(sub_id)
+        if sub is None:
+            continue
+        group = sub.group
+        if group not in actual_by_group:
+            actual_by_group[group] = _ZERO
+            expected_by_group.setdefault(group, _ZERO)
+            lines_by_group.setdefault(group, [])
+        actual_by_group[group] = as_money(actual_by_group[group] + used)
+
+    groups: list[BudgetGroupOut] = []
+    for group in BUDGET_GROUPS:
+        lines = sorted(lines_by_group.get(group, []), key=lambda line: line.subcategory_name.lower())
+        groups.append(
+            BudgetGroupOut(
+                group=group,
+                direction=GROUP_DIRECTIONS[group],
+                expected=as_money(expected_by_group.get(group, _ZERO)),
+                actual=as_money(actual_by_group.get(group, _ZERO)),
+                lines=lines,
+            )
+        )
+
+    income_expected = expected_by_group.get(GROUP_INCOME, _ZERO)
+    income_actual = actual_by_group.get(GROUP_INCOME, _ZERO)
+    total_expenses_expected = sum(
+        (expected_by_group.get(g, _ZERO) for g in OUTFLOW_GROUPS),
+        _ZERO,
+    )
+    total_expenses_actual = sum(
+        (actual_by_group.get(g, _ZERO) for g in OUTFLOW_GROUPS),
+        _ZERO,
+    )
+    summary = BudgetPeriodSummaryOut(
+        income_expected=as_money(income_expected),
+        income_actual=as_money(income_actual),
+        total_expenses_expected=as_money(total_expenses_expected),
+        total_expenses_actual=as_money(total_expenses_actual),
+        left_over_expected=as_money(income_expected - total_expenses_expected),
+        left_over_actual=as_money(income_actual - total_expenses_actual),
+    )
+
     return BudgetPeriodOut(
         id=period.id,
         family_id=period.family_id,
@@ -196,32 +316,34 @@ def period_to_out(db: Session, family: Family, period: BudgetPeriod) -> BudgetPe
         end_date=period.end_date,
         label_month=period.label_month,
         currency=period.currency,
-        overall=overall_out,
-        categories=category_outs,
+        groups=groups,
+        summary=summary,
         created_at=period.created_at,
         updated_at=period.updated_at,
     )
 
 
 def overall_budget_summary(db: Session, family: Family) -> BudgetSummaryOut | None:
+    """Household outflow guardrail for dashboard /spend strip."""
     period = current_period(db, family)
     if period is None:
         return None
-    overall = next((b for b in period.budgets if b.category is None), None)
-    if overall is None:
+    out = period_to_out(db, family, period)
+    amount = out.summary.total_expenses_expected
+    used = out.summary.total_expenses_actual
+    if amount <= 0 and used <= 0:
         return None
-    usage = period_usage(db, family, period)
-    used = usage.get(None, _ZERO)
-    amount = as_money(overall.amount)
-    percent_used, state = derive_state(used, amount)
+    # When no expected outflow is set, still surface actual spend against amount=used
+    effective_amount = amount if amount > 0 else used
+    percent_used, state = derive_state(used, effective_amount if effective_amount > 0 else Decimal("0.01"))
     return BudgetSummaryOut(
         period_id=period.id,
         label_month=period.label_month,
         start_date=period.start_date,
         end_date=period.end_date,
-        amount=amount,
-        used=used,
-        remaining=as_money(amount - used),
+        amount=as_money(effective_amount),
+        used=as_money(used),
+        remaining=as_money(effective_amount - used),
         percent_used=percent_used,
         state=state,
     )
@@ -267,27 +389,46 @@ def list_periods(
 
 
 def _dedupe_budget_lines(lines: list[BudgetLineIn]) -> list[BudgetLineIn]:
-    seen: set[str | None] = set()
+    seen: set[UUID] = set()
     result: list[BudgetLineIn] = []
     for line in lines:
-        if line.category in seen:
-            raise bad_request("Duplicate budget category in request")
-        seen.add(line.category)
+        if line.subcategory_id in seen:
+            raise bad_request("Duplicate budget subcategory in request")
+        seen.add(line.subcategory_id)
         result.append(line)
     return result
 
 
+def _validate_subcategories(db: Session, family_id: UUID, lines: list[BudgetLineIn]) -> None:
+    if not lines:
+        return
+    ids = {line.subcategory_id for line in lines}
+    rows = (
+        db.query(BudgetSubcategory)
+        .filter(
+            BudgetSubcategory.id.in_(ids),
+            BudgetSubcategory.family_id == family_id,
+            BudgetSubcategory.archived_at.is_(None),
+        )
+        .all()
+    )
+    found = {row.id for row in rows}
+    missing = ids - found
+    if missing:
+        raise bad_request("One or more budget subcategories are invalid")
+
+
 def _replace_period_budgets(db: Session, period: BudgetPeriod, lines: list[BudgetLineIn]) -> None:
-    # Flush deletes before inserts — otherwise SQLAlchemy may INSERT the new
-    # overall/category rows before DELETE, violating uq_budgets_period_overall.
+    deduped = _dedupe_budget_lines(lines)
+    _validate_subcategories(db, period.family_id, deduped)
     for existing in list(period.budgets):
         db.delete(existing)
     db.flush()
-    for line in _dedupe_budget_lines(lines):
+    for line in deduped:
         db.add(
             Budget(
                 period_id=period.id,
-                category=line.category,
+                subcategory_id=line.subcategory_id,
                 amount=line.amount,
             )
         )
@@ -309,6 +450,7 @@ def create_period(
     user: User,
     data: BudgetPeriodCreate,
 ) -> BudgetPeriodOut:
+    subcategory_service.ensure_family_subcategories(db, family.id)
     _assert_no_overlap(db, family.id, data.start_date, data.end_date)
     label = data.label_month or default_label_month(data.end_date)
     period = BudgetPeriod(
@@ -359,6 +501,45 @@ def update_period(
     return out
 
 
+def copy_period(
+    db: Session,
+    family: Family,
+    user: User,
+    data: BudgetPeriodCopy,
+) -> BudgetPeriodOut:
+    subcategory_service.ensure_family_subcategories(db, family.id)
+    source: BudgetPeriod | None = None
+    if data.source_period_id is not None:
+        source = get_period(db, data.source_period_id)
+        if source.family_id != family.id:
+            raise not_found("Budget period not found")
+    else:
+        source = (
+            db.query(BudgetPeriod)
+            .options(joinedload(BudgetPeriod.budgets))
+            .filter(BudgetPeriod.family_id == family.id)
+            .order_by(BudgetPeriod.end_date.desc())
+            .first()
+        )
+    lines: list[BudgetLineIn] = []
+    if source is not None:
+        lines = [
+            BudgetLineIn(subcategory_id=b.subcategory_id, amount=as_money(b.amount))
+            for b in source.budgets
+        ]
+    return create_period(
+        db,
+        family,
+        user,
+        BudgetPeriodCreate(
+            start_date=data.start_date,
+            end_date=data.end_date,
+            label_month=data.label_month,
+            budgets=lines,
+        ),
+    )
+
+
 def delete_period(db: Session, period: BudgetPeriod) -> None:
     period_id = period.id
     family_id = period.family_id
@@ -378,8 +559,16 @@ def update_budget(db: Session, family: Family, budget: Budget, data: BudgetUpdat
     budget.updated_at = utcnow()
     db.commit()
     db.refresh(budget)
-    used = period_usage(db, family, period).get(budget.category, _ZERO)
-    out = budget_to_out(budget, family_id=family.id, currency=period.currency, used=used)
+    used_map, settlements = period_usage(db, family, period)
+    sub = subcategory_service.get_subcategory_any(db, budget.subcategory_id)
+    out = budget_to_out(
+        budget,
+        family_id=family.id,
+        currency=period.currency,
+        used=used_map.get(budget.subcategory_id, _ZERO),
+        subcategory=sub,
+        settlement_expense_id=settlements.get(budget.id),
+    )
     period_out = period_to_out(db, family, get_period(db, period.id))
     _broadcast_period(family.id, period_out)
     return out
@@ -389,13 +578,20 @@ def delete_budget(db: Session, budget: Budget) -> None:
     period = get_period(db, budget.period_id)
     family_id = period.family_id
     budget_id = budget.id
+    # Remove settlement entry if present
+    settlement = (
+        db.query(Expense)
+        .filter(Expense.source_type == SOURCE_BUDGET_LINE, Expense.source_id == budget_id)
+        .first()
+    )
+    if settlement is not None:
+        db.delete(settlement)
     db.delete(budget)
     db.commit()
     hub.broadcast(
         family_id,
         {"type": "budget.deleted", "budget_id": str(budget_id)},
     )
-    # Also refresh period view for clients listening to period updates
     family = db.get(Family, family_id)
     if family is not None:
         try:
@@ -405,8 +601,79 @@ def delete_budget(db: Session, budget: Budget) -> None:
             pass
 
 
-def _scope_label(category: str | None) -> str:
-    return category if category else "Household"
+def settle_budget(
+    db: Session,
+    family: Family,
+    user: User,
+    budget: Budget,
+) -> BudgetPeriodOut:
+    period = get_period(db, budget.period_id)
+    if period.family_id != family.id:
+        raise not_found("Budget not found")
+    existing = (
+        db.query(Expense)
+        .filter(Expense.source_type == SOURCE_BUDGET_LINE, Expense.source_id == budget.id)
+        .first()
+    )
+    if existing is not None:
+        return period_to_out(db, family, period)
+
+    sub = subcategory_service.get_subcategory_any(db, budget.subcategory_id)
+    # Settle on the period end date at noon family-local so it falls inside the cycle
+    zone = family_zone(family.timezone)
+    occurred_at = datetime(
+        period.end_date.year,
+        period.end_date.month,
+        period.end_date.day,
+        12,
+        0,
+        tzinfo=zone,
+    )
+    expense = Expense(
+        family_id=family.id,
+        amount=as_money(budget.amount),
+        currency=period.currency,
+        subcategory_id=budget.subcategory_id,
+        merchant=None,
+        note=f"Settled: {sub.name}",
+        occurred_at=occurred_at,
+        created_by=user.id,
+        source_type=SOURCE_BUDGET_LINE,
+        source_id=budget.id,
+    )
+    db.add(expense)
+    db.commit()
+    out = period_to_out(db, family, get_period(db, period.id))
+    _broadcast_period(family.id, out)
+    if not is_inflow_group(sub.group):
+        safe_evaluate_budget_alerts(db, family.id, actor_user_id=user.id, as_of=period.end_date)
+    return out
+
+
+def unsettle_budget(
+    db: Session,
+    family: Family,
+    budget: Budget,
+) -> BudgetPeriodOut:
+    period = get_period(db, budget.period_id)
+    if period.family_id != family.id:
+        raise not_found("Budget not found")
+    existing = (
+        db.query(Expense)
+        .filter(Expense.source_type == SOURCE_BUDGET_LINE, Expense.source_id == budget.id)
+        .first()
+    )
+    if existing is not None:
+        db.delete(existing)
+        db.commit()
+        safe_recover_budget_alerts(db, family.id, as_of=period.end_date)
+    out = period_to_out(db, family, get_period(db, period.id))
+    _broadcast_period(family.id, out)
+    return out
+
+
+def _scope_label(subcategory: BudgetSubcategory) -> str:
+    return f"{subcategory.group} · {subcategory.name}"
 
 
 def _alert_exists(db: Session, budget_id: UUID, threshold: int) -> bool:
@@ -451,12 +718,13 @@ def _send_budget_notification(
     *,
     family: Family,
     budget: Budget,
+    subcategory: BudgetSubcategory,
     used: Decimal,
     threshold: int,
     actor_user_id: UUID | None,
     period: BudgetPeriod,
 ) -> None:
-    scope = _scope_label(budget.category)
+    scope = _scope_label(subcategory)
     amount = as_money(budget.amount)
     used_money = as_money(used)
     if threshold >= 100 and used_money > amount:
@@ -494,9 +762,13 @@ def recover_budget_alerts(
     period = current_period(db, family, on=as_of)
     if period is None:
         return
-    usage = period_usage(db, family, period)
+    used_map, _ = period_usage(db, family, period)
+    subcats = _load_subcategories(db, {b.subcategory_id for b in period.budgets})
     for budget in period.budgets:
-        used = usage.get(budget.category, _ZERO)
+        sub = subcats.get(budget.subcategory_id)
+        if sub is None or is_inflow_group(sub.group):
+            continue
+        used = used_map.get(budget.subcategory_id, _ZERO)
         percent_used, _ = derive_state(used, as_money(budget.amount))
         _clear_alerts_below(db, budget.id, percent_used)
 
@@ -514,9 +786,13 @@ def evaluate_budget_alerts(
     period = current_period(db, family, on=as_of)
     if period is None:
         return
-    usage = period_usage(db, family, period)
+    used_map, _ = period_usage(db, family, period)
+    subcats = _load_subcategories(db, {b.subcategory_id for b in period.budgets})
     for budget in period.budgets:
-        used = usage.get(budget.category, _ZERO)
+        sub = subcats.get(budget.subcategory_id)
+        if sub is None or is_inflow_group(sub.group):
+            continue
+        used = used_map.get(budget.subcategory_id, _ZERO)
         amount = as_money(budget.amount)
         percent_used, _ = derive_state(used, amount)
 
@@ -533,6 +809,7 @@ def evaluate_budget_alerts(
             db,
             family=family,
             budget=budget,
+            subcategory=sub,
             used=used,
             threshold=notify_threshold,
             actor_user_id=actor_user_id,
@@ -576,3 +853,86 @@ def safe_recover_budget_alerts(
         recover_budget_alerts(db, family_id, as_of=day)
     except Exception:  # noqa: BLE001
         logger.exception("Budget alert recovery failed for family %s", family_id)
+
+
+def get_insights(db: Session, family: Family, *, months: int = 12) -> BudgetInsightsOut:
+    from app.core.timeutil import add_calendar_months, family_now
+
+    subcategory_service.ensure_family_subcategories(db, family.id)
+    now = family_now(family.timezone)
+    start_year, start_month = add_calendar_months(now.year, now.month, -(months - 1))
+
+    periods = (
+        db.query(BudgetPeriod)
+        .options(joinedload(BudgetPeriod.budgets))
+        .filter(BudgetPeriod.family_id == family.id)
+        .order_by(BudgetPeriod.start_date.desc())
+        .all()
+    )
+    by_label = {p.label_month: p for p in periods}
+
+    month_rows: list[BudgetInsightsMonthOut] = []
+    currency = "EUR"
+    for i in range(months):
+        year, month = add_calendar_months(start_year, start_month, i)
+        key = f"{year:04d}-{month:02d}"
+        period = by_label.get(key)
+        if period is not None:
+            out = period_to_out(db, family, period)
+            currency = out.currency
+            month_rows.append(
+                BudgetInsightsMonthOut(
+                    month=key,
+                    income_expected=out.summary.income_expected,
+                    income_actual=out.summary.income_actual,
+                    outflow_expected=out.summary.total_expenses_expected,
+                    outflow_actual=out.summary.total_expenses_actual,
+                    net_expected=out.summary.left_over_expected,
+                    net_actual=out.summary.left_over_actual,
+                    groups=out.groups,
+                )
+            )
+            continue
+
+        # No planned period: still show actual ledger for that calendar month
+        from app.core.timeutil import month_bounds
+
+        start, end = month_bounds(family.timezone, year, month)
+        rows = (
+            db.query(BudgetSubcategory.group, func.sum(Expense.amount))
+            .join(Expense, Expense.subcategory_id == BudgetSubcategory.id)
+            .filter(
+                Expense.family_id == family.id,
+                Expense.occurred_at >= start,
+                Expense.occurred_at < end,
+            )
+            .group_by(BudgetSubcategory.group)
+            .all()
+        )
+        actual_by_group = {g: as_money(total) for g, total in rows}
+        groups = [
+            BudgetGroupOut(
+                group=group,
+                direction=GROUP_DIRECTIONS[group],
+                expected=_ZERO,
+                actual=as_money(actual_by_group.get(group, _ZERO)),
+                lines=[],
+            )
+            for group in BUDGET_GROUPS
+        ]
+        income_actual = actual_by_group.get(GROUP_INCOME, _ZERO)
+        outflow_actual = sum((actual_by_group.get(g, _ZERO) for g in OUTFLOW_GROUPS), _ZERO)
+        month_rows.append(
+            BudgetInsightsMonthOut(
+                month=key,
+                income_expected=_ZERO,
+                income_actual=as_money(income_actual),
+                outflow_expected=_ZERO,
+                outflow_actual=as_money(outflow_actual),
+                net_expected=_ZERO,
+                net_actual=as_money(income_actual - outflow_actual),
+                groups=groups,
+            )
+        )
+
+    return BudgetInsightsOut(currency=currency, months=month_rows)

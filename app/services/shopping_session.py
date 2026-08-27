@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.exceptions import bad_request, conflict, not_found
 from app.core.timeutil import month_key, parse_year_month
-from app.models.expense import CATEGORY_SHOPPING
 from app.models.family import Family
 from app.models.receipt import Receipt, ReceiptItem
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
@@ -267,6 +266,8 @@ def complete_session(
     db.refresh(session)
     db.refresh(expense)
 
+    from app.services import budget_subcategory as subcategory_service
+
     session_out = _session_to_out(session)
     item_count = session_out.item_count
     cost_label = f"€{data.total_cost:.2f}"
@@ -277,12 +278,13 @@ def complete_session(
             "session": session_out.model_dump(mode="json"),
         },
     )
+    groceries = subcategory_service.get_subcategory_any(db, expense.subcategory_id)
     hub.broadcast(
         family_id,
         {
             "type": "expense.created",
             "expense": expense_service.expense_to_out(
-                expense, source_item_count=item_count
+                expense, subcategory=groceries, source_item_count=item_count
             ).model_dump(mode="json"),
         },
     )
@@ -343,7 +345,7 @@ def list_completed_sessions(
 
 
 def get_shopping_spend(db: Session, family: Family, *, months: int = 12) -> ShoppingSpendOut:
-    spend = expense_service.get_spend(db, family, months=months, category=CATEGORY_SHOPPING)
+    spend = expense_service.get_spend(db, family, months=months, groceries_only=True)
     return ShoppingSpendOut(
         currency=spend.currency,
         current_month=spend.current_month,
@@ -515,7 +517,7 @@ def create_completed_session_from_receipt(
                 name=item.name[:200],
                 quantity=item.quantity,
                 unit=item.unit,
-                category=CATEGORY_SHOPPING,
+                category="Shopping",
                 location_id=None,
                 location_name=None,
                 added_at=occurred_at,

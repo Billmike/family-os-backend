@@ -1,4 +1,5 @@
 from app.models.budget import Budget, BudgetAlert, BudgetPeriod
+from app.models.budget_subcategory import BudgetSubcategory
 from app.models.event import Event, EventMember, EventReminder
 from app.models.expense import Expense
 from app.models.family import Family, FamilyInvitation, FamilyMember
@@ -28,6 +29,7 @@ __all__ = [
     "Budget",
     "BudgetAlert",
     "BudgetPeriod",
+    "BudgetSubcategory",
     "Receipt",
     "ReceiptItem",
     "Notification",
