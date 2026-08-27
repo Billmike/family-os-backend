@@ -66,6 +66,59 @@ def test_period_usage_by_subcategory(db_session: Session) -> None:
     assert used.get(groceries.id) == Decimal("75.00")
 
 
+def test_period_to_out_isolates_adjacent_cycles(db_session: Session) -> None:
+    family, user, groceries = _seed_family_with_groceries(db_session)
+    db_session.add(
+        Expense(
+            family_id=family.id,
+            amount=Decimal("500.00"),
+            currency="EUR",
+            subcategory_id=groceries.id,
+            occurred_at=datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc),
+            created_by=user.id,
+            source_type=SOURCE_MANUAL,
+        )
+    )
+    period_a = BudgetPeriod(
+        family_id=family.id,
+        start_date=date(2026, 8, 1),
+        end_date=date(2026, 8, 25),
+        label_month="2026-08",
+        currency="EUR",
+        created_by=user.id,
+    )
+    period_b = BudgetPeriod(
+        family_id=family.id,
+        start_date=date(2026, 8, 26),
+        end_date=date(2026, 9, 26),
+        label_month="2026-09",
+        currency="EUR",
+        created_by=user.id,
+    )
+    db_session.add_all([period_a, period_b])
+    db_session.flush()
+    db_session.add_all(
+        [
+            Budget(period_id=period_a.id, subcategory_id=groceries.id, amount=Decimal("600.00")),
+            Budget(period_id=period_b.id, subcategory_id=groceries.id, amount=Decimal("600.00")),
+        ]
+    )
+    db_session.commit()
+
+    out_a = budget_service.period_to_out(db_session, family, period_a)
+    out_b = budget_service.period_to_out(db_session, family, period_b)
+    line_a = next(
+        line for group in out_a.groups for line in group.lines if line.subcategory_id == groceries.id
+    )
+    line_b = next(
+        line for group in out_b.groups for line in group.lines if line.subcategory_id == groceries.id
+    )
+    assert line_a.used == Decimal("500.00")
+    assert line_b.used == Decimal("0.00")
+    assert out_a.summary.total_expenses_actual == Decimal("500.00")
+    assert out_b.summary.total_expenses_actual == Decimal("0.00")
+
+
 def test_current_period_empty(client: TestClient) -> None:
     headers = auth_headers(client, "budget-empty@example.com", name="Owner")
     family_id = client.post(

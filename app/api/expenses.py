@@ -29,12 +29,16 @@ def create_expense(
 @router.get("/api/families/{family_id}/expenses", response_model=list[ExpenseOut])
 def list_expenses(
     family_id: UUID,
-    month: str = Query(..., description="YYYY-MM in the family timezone"),
+    month: str | None = Query(default=None, description="YYYY-MM in the family timezone"),
+    period_id: UUID | None = Query(
+        default=None,
+        description="Budget period whose start/end dates bound the list",
+    ),
     _: FamilyMember = Depends(require_family_member),
     db: Session = Depends(get_db),
 ) -> list[ExpenseOut]:
     family = family_service.get_family(db, family_id)
-    return expense_service.list_expenses(db, family, month=month)
+    return expense_service.list_expenses(db, family, month=month, period_id=period_id)
 
 
 @router.get("/api/families/{family_id}/spend", response_model=HouseholdSpendOut)

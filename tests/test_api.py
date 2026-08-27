@@ -1446,3 +1446,111 @@ def test_list_expenses_rejects_invalid_month(client: TestClient) -> None:
     bad = client.get(f"/api/families/{family_id}/expenses?month=2026-13", headers=headers)
     assert bad.status_code == 400
 
+
+def test_list_expenses_requires_month_or_period_id(client: TestClient) -> None:
+    headers = auth_headers(client, "expense-xor@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "XOR Family", "timezone": "UTC"},
+    ).json()["id"]
+    missing = client.get(f"/api/families/{family_id}/expenses", headers=headers)
+    assert missing.status_code == 400
+
+    both = client.get(
+        f"/api/families/{family_id}/expenses?month=2026-08&period_id=00000000-0000-0000-0000-000000000001",
+        headers=headers,
+    )
+    assert both.status_code == 400
+
+
+def test_list_expenses_by_period_isolates_cycles(client: TestClient) -> None:
+    headers = auth_headers(client, "expense-cycle@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Cycle Family", "timezone": "UTC"},
+    ).json()["id"]
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    groceries = next(
+        s for g in subs["groups"] for s in g["subcategories"] if s["role"] == "groceries"
+    )
+    period_a = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-25",
+            "label_month": "2026-08",
+            "budgets": [{"subcategory_id": groceries["id"], "amount": "600.00"}],
+        },
+    )
+    assert period_a.status_code == 201, period_a.text
+    period_b = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": "2026-08-26",
+            "end_date": "2026-09-26",
+            "label_month": "2026-09",
+            "budgets": [{"subcategory_id": groceries["id"], "amount": "600.00"}],
+        },
+    )
+    assert period_b.status_code == 201, period_b.text
+    id_a = period_a.json()["id"]
+    id_b = period_b.json()["id"]
+
+    created = client.post(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        json={
+            "amount": "500.00",
+            "subcategory_id": groceries["id"],
+            "merchant": "Aldi",
+            "occurred_at": "2026-08-10T12:00:00Z",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    listed_b = client.get(
+        f"/api/families/{family_id}/expenses?period_id={id_b}",
+        headers=headers,
+    )
+    assert listed_b.status_code == 200
+    assert listed_b.json() == []
+
+    listed_a = client.get(
+        f"/api/families/{family_id}/expenses?period_id={id_a}",
+        headers=headers,
+    )
+    assert listed_a.status_code == 200
+    rows_a = listed_a.json()
+    assert len(rows_a) == 1
+    assert float(rows_a[0]["amount"]) == 500.00
+
+    august = client.get(
+        f"/api/families/{family_id}/expenses?month=2026-08",
+        headers=headers,
+    )
+    assert august.status_code == 200
+    assert len(august.json()) == 1
+
+    listed = client.get(f"/api/families/{family_id}/budget-periods", headers=headers)
+    by_id = {row["id"]: row for row in listed.json()["periods"]}
+    groceries_a = next(
+        line
+        for group in by_id[id_a]["groups"]
+        for line in group["lines"]
+        if line["subcategory_id"] == groceries["id"]
+    )
+    groceries_b = next(
+        line
+        for group in by_id[id_b]["groups"]
+        for line in group["lines"]
+        if line["subcategory_id"] == groceries["id"]
+    )
+    assert float(groceries_a["used"]) == 500.00
+    assert float(groceries_b["used"]) == 0.00
+    assert float(by_id[id_a]["summary"]["total_expenses_actual"]) == 500.00
+    assert float(by_id[id_b]["summary"]["total_expenses_actual"]) == 0.00
+

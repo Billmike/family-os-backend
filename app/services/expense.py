@@ -16,6 +16,7 @@ from app.core.timeutil import (
     month_bounds,
     month_key,
     parse_year_month,
+    period_bounds,
 )
 from app.services import budget as budget_service
 from app.services import budget_subcategory as subcategory_service
@@ -216,17 +217,12 @@ def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate)
     return out
 
 
-def list_expenses(
+def _list_expenses_in_range(
     db: Session,
     family: Family,
-    *,
-    month: str,
+    start: datetime,
+    end: datetime,
 ) -> list[ExpenseOut]:
-    try:
-        year, month_num = parse_year_month(month)
-    except ValueError as exc:
-        raise bad_request(str(exc)) from exc
-    start, end = month_bounds(family.timezone, year, month_num)
     rows = (
         db.query(Expense)
         .filter(
@@ -252,6 +248,33 @@ def list_expenses(
             )
         )
     return result
+
+
+def list_expenses(
+    db: Session,
+    family: Family,
+    *,
+    month: str | None = None,
+    period_id: UUID | None = None,
+) -> list[ExpenseOut]:
+    has_month = month is not None and month.strip() != ""
+    has_period = period_id is not None
+    if has_month == has_period:
+        raise bad_request("Provide exactly one of month or period_id")
+    if has_period:
+        assert period_id is not None
+        period = budget_service.get_period(db, period_id)
+        if period.family_id != family.id:
+            raise not_found("Budget period not found")
+        start, end = period_bounds(family.timezone, period.start_date, period.end_date)
+        return _list_expenses_in_range(db, family, start, end)
+    assert month is not None
+    try:
+        year, month_num = parse_year_month(month)
+    except ValueError as exc:
+        raise bad_request(str(exc)) from exc
+    start, end = month_bounds(family.timezone, year, month_num)
+    return _list_expenses_in_range(db, family, start, end)
 
 
 def update_expense(db: Session, expense: Expense, data: ExpenseUpdate) -> ExpenseOut:

@@ -936,15 +936,22 @@ Create a manual expense.
 
 ### `GET /api/families/{family_id}/expenses`
 
-**Query:** `month` (required `YYYY-MM`, family timezone)
+**Query:** exactly one of:
+
+| Param | Notes |
+|-------|--------|
+| `period_id` | UUID of a budget period for this family. Filters by that cycle’s `start_date`–`end_date` (family timezone, half-open bounds — same window as budget `used`). |
+| `month` | `YYYY-MM` in the family timezone (calendar-month list, kept for compatibility). |
 
 **Response `200`** — `ExpenseOut[]` newest `occurred_at` first.
 
-**Response `400`** — `month` is not a valid `YYYY-MM`.
+**Response `400`** — neither or both params, or `month` is not a valid `YYYY-MM`.
+
+**Response `404`** — `period_id` does not exist or belongs to another family.
 
 ### `GET /api/families/{family_id}/spend`
 
-Monthly household spend for Expenses. Totals come from the expense ledger (all categories). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous.
+Monthly household spend for Insights-style charts. Totals come from the expense ledger (outflow groups). Months are bucketed in the family timezone. Zero-spend months are included so the window is contiguous. The Spend screen and Dashboard headline do **not** use these month buckets — they follow the selected/current pay cycle.
 
 **Query:** `months` (default 12, min 1, max 36)
 
@@ -988,7 +995,7 @@ When a household budget exists for the **current pay cycle**, the response inclu
 }
 ```
 
-`state` is `ok` below 80% used, `warning` at 80–99%, and `over` at 100% or above. `null` when no period covers today or the current period has no household (overall) limit. Calendar month totals in `months` are unchanged — budget usage is summed over the cycle window, not the calendar month.
+`state` is `ok` below 80% used, `warning` at 80–99%, and `over` at 100% or above. `null` when no period covers today or the current period has no household (overall) limit. Calendar month totals in `months` remain for Insights-style charts — the Spend UI and Dashboard headline use cycle bounds, not these month buckets.
 
 ---
 
