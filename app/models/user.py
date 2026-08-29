@@ -32,6 +32,7 @@ class User(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String, nullable=True)
 
     members = relationship("FamilyMember", back_populates="user")
     notification_preferences = relationship(

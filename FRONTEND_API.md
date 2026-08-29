@@ -178,6 +178,7 @@ Auth required.
   "email": "kayode@familyos.app",
   "name": "Kayode",
   "avatar_url": null,
+  "timezone": null,
   "created_at": "2026-08-15T08:48:38.919908Z",
   "updated_at": "2026-08-15T08:48:38.919908Z"
 }
@@ -1149,6 +1150,143 @@ Update a **manual** or **receipt** expense. Shopping-sourced rows return `400`.
 
 ---
 
+## Personal expenses
+
+Private, user-owned ledger. Not family-scoped. Other members — including the family Owner — cannot see these accounts. Leaving or deleting a family does not delete them.
+
+Categories: `Dining`, `Transport`, `Shopping`, `Health`, `Entertainment`, `Travel`, `Subscriptions`, `Other`.
+
+Month bounds use `users.timezone` (IANA), falling back to `UTC`. Creating a family or accepting an invite sets `users.timezone` from the family timezone when it is still null. Creating an account may pass `timezone` to fill a still-null user timezone.
+
+`GET` does not auto-create an account.
+
+Unknown ids return `404` (not `403`) so existence is not leaked.
+
+### `GET /api/me/expense-accounts`
+
+Auth required. Empty `accounts` is valid.
+
+**Response `200`**
+
+```json
+{
+  "timezone": "Europe/Berlin",
+  "current_month": "2026-08",
+  "current_month_total": "86.00",
+  "current_month_count": 4,
+  "currency": "EUR",
+  "accounts": [
+    {
+      "id": "...",
+      "name": "Coffee money",
+      "currency": "EUR",
+      "sort_order": 0,
+      "current_month_total": "42.00",
+      "current_month_count": 3,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+`current_month_*` on the envelope is the sum across all accounts for the current calendar month in the user's timezone.
+
+### `POST /api/me/expense-accounts`
+
+**Request**
+
+```json
+{
+  "name": "Coffee money",
+  "currency": "EUR",
+  "timezone": "Europe/Berlin"
+}
+```
+
+| Field | Notes |
+|-------|--------|
+| `name` | Required, 1–40 chars after trim |
+| `currency` | Optional, 3-letter code, default `EUR` |
+| `timezone` | Optional IANA string; stored on the user when `users.timezone` is still null |
+
+**Response `200`** — `PersonalAccountOut` (`current_month_total` is `0.00`).
+
+**Response `409`** — same user already has an account with that name.
+
+### `PATCH /api/me/expense-accounts/{account_id}`
+
+**Request** — any subset of `name`, `currency`.
+
+**Response `200`** — `PersonalAccountOut`.
+
+**Response `404`** — not found or not owned by the caller.
+
+**Response `409`** — rename collides with another of the caller's accounts.
+
+### `DELETE /api/me/expense-accounts/{account_id}`
+
+Deletes the account and all of its expenses.
+
+**Response `204`**.
+
+**Response `404`** — not found or not owned by the caller.
+
+### `GET /api/me/expense-accounts/{account_id}/expenses`
+
+**Query:** `month` (required `YYYY-MM` in the user's timezone).
+
+**Response `200`** — `PersonalExpenseOut[]` newest `occurred_at` first.
+
+**Response `400`** — `month` is not a valid `YYYY-MM`.
+
+**Response `404`** — account not found or not owned by the caller.
+
+### `POST /api/me/expense-accounts/{account_id}/expenses`
+
+Create a manual personal expense.
+
+**Request**
+
+```json
+{
+  "amount": "12.50",
+  "category": "Dining",
+  "merchant": "Café",
+  "note": "Lunch",
+  "occurred_at": "2026-08-29T12:00:00Z"
+}
+```
+
+| Field | Notes |
+|-------|--------|
+| `amount` | Required, greater than zero |
+| `category` | One of the categories above; default `Other` |
+| `merchant` | Optional, max 120 |
+| `note` | Optional, max 500 |
+| `occurred_at` | Optional ISO datetime; defaults to now |
+| `currency` | Optional, 3-letter code; defaults to the account currency |
+
+**Response `200`** — `PersonalExpenseOut`.
+
+**Response `422`** — unknown category.
+
+### `PATCH /api/personal-expenses/{expense_id}`
+
+**Request** — any subset of `amount`, `category`, `merchant`, `note`, `occurred_at`.
+
+**Response `200`** — `PersonalExpenseOut`.
+
+**Response `404`** — not found or not owned by the caller.
+
+### `DELETE /api/personal-expenses/{expense_id}`
+
+**Response `204`**.
+
+**Response `404`** — not found or not owned by the caller.
+
+---
+
 ## Receipts
 
 Upload a receipt photo, extract merchant / line items / total with OpenAI vision, then confirm to create an itemized expense (`source_type: "receipt"`).
@@ -1665,6 +1803,14 @@ async function api<T>(
 | POST | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/expenses` | Yes |
 | GET | `/api/families/{family_id}/spend` | Yes |
+| GET | `/api/me/expense-accounts` | Yes |
+| POST | `/api/me/expense-accounts` | Yes |
+| PATCH | `/api/me/expense-accounts/{id}` | Yes |
+| DELETE | `/api/me/expense-accounts/{id}` | Yes |
+| GET | `/api/me/expense-accounts/{id}/expenses` | Yes |
+| POST | `/api/me/expense-accounts/{id}/expenses` | Yes |
+| PATCH | `/api/personal-expenses/{expense_id}` | Yes |
+| DELETE | `/api/personal-expenses/{expense_id}` | Yes |
 | GET | `/api/families/{family_id}/budget-periods/current` | Yes |
 | GET | `/api/families/{family_id}/budget-periods` | Yes |
 | POST | `/api/families/{family_id}/budget-periods` | Yes (Parent/Owner) |

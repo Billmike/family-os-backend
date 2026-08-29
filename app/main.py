@@ -18,6 +18,7 @@ from app.api import (
     expenses,
     families,
     notifications,
+    personal_expenses,
     receipts,
     shopping,
     shopping_sessions,
@@ -88,6 +89,7 @@ app.include_router(tasks.router)
 app.include_router(shopping.router)
 app.include_router(shopping_sessions.router)
 app.include_router(expenses.router)
+app.include_router(personal_expenses.router)
 app.include_router(budgets.router)
 app.include_router(budget_subcategories.router)
 app.include_router(receipts.router)

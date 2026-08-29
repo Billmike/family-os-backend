@@ -54,5 +54,6 @@ class UserOut(ORMModel):
     email: EmailStr
     name: str
     avatar_url: str | None
+    timezone: str | None = None
     created_at: datetime
     updated_at: datetime

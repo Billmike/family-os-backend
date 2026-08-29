@@ -15,6 +15,7 @@ from app.models.shopping import ShoppingList, ShoppingLocation, DEFAULT_SHOPPING
 from app.models.user import User
 from app.realtime.hub import hub
 from app.services import notifications as notification_service
+from app.services.personal_expense import ensure_user_timezone
 from app.schemas.family import (
     FamilyCreate,
     FamilyOut,
@@ -74,6 +75,7 @@ def create_family(db: Session, user: User, data: FamilyCreate) -> Family:
     groceries = ShoppingList(family_id=family.id, name="Groceries")
     db.add(groceries)
     seed_default_shopping_locations(db, family.id)
+    ensure_user_timezone(user, data.timezone)
     db.commit()
     db.refresh(family)
     return family
@@ -200,6 +202,9 @@ def accept_invitation(
     )
     if existing:
         family = get_family(db, invitation.family_id)
+        if not user.timezone:
+            ensure_user_timezone(user, family.timezone)
+            db.commit()
         return family, existing
 
     # Atomic single-use claim: only one concurrent new joiner can set accepted_at.
@@ -228,6 +233,9 @@ def accept_invitation(
         avatar_url=user.avatar_url,
     )
     db.add(member)
+    family_for_tz = db.get(Family, invitation.family_id)
+    if family_for_tz is not None:
+        ensure_user_timezone(user, family_for_tz.timezone)
     db.commit()
     db.refresh(member)
     family = get_family(db, invitation.family_id)

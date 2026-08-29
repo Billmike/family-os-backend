@@ -3,6 +3,7 @@ from app.models.budget_subcategory import BudgetSubcategory
 from app.models.event import Event, EventMember, EventReminder
 from app.models.expense import Expense
 from app.models.family import Family, FamilyInvitation, FamilyMember
+from app.models.personal_expense import PersonalExpense, PersonalExpenseAccount
 from app.models.notification import Notification, NotificationPreference, PushSubscription
 from app.models.receipt import Receipt, ReceiptItem
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
@@ -26,6 +27,8 @@ __all__ = [
     "ShoppingSession",
     "ShoppingSessionItem",
     "Expense",
+    "PersonalExpenseAccount",
+    "PersonalExpense",
     "Budget",
     "BudgetAlert",
     "BudgetPeriod",
