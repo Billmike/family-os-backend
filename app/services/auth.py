@@ -13,6 +13,7 @@ from app.core.security import (
 from app.models.notification import NotificationPreference
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserOut
+from app.services.assistant import is_assistant_available
 
 
 def register_user(db: Session, data: RegisterRequest) -> tuple[User, TokenResponse]:
@@ -52,7 +53,9 @@ def refresh_tokens(db: Session, refresh_token: str) -> TokenResponse:
 
 
 def user_to_out(user: User) -> UserOut:
-    return UserOut.model_validate(user)
+    return UserOut.model_validate(user).model_copy(
+        update={"assistant_enabled": is_assistant_available()}
+    )
 
 
 def _tokens_for(user: User) -> TokenResponse:

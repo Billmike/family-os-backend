@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     receipt_scanning_enabled: bool = True
     receipt_storage_dir: str = "var/receipts"
     receipt_max_bytes: int = 10_485_760
+    assistant_enabled: bool = True
 
     @property
     def cors_origin_list(self) -> list[str]:

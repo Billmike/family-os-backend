@@ -180,7 +180,8 @@ Auth required.
   "avatar_url": null,
   "timezone": null,
   "created_at": "2026-08-15T08:48:38.919908Z",
-  "updated_at": "2026-08-15T08:48:38.919908Z"
+  "updated_at": "2026-08-15T08:48:38.919908Z",
+  "assistant_enabled": false
 }
 ```
 
@@ -1287,6 +1288,43 @@ Create a manual personal expense.
 
 ---
 
+## Assistant
+
+A private, ephemeral turn. The client holds the thread and resends it each time. The Assistant proposes only; it never writes a spend row. Closing the panel discards the thread — nothing is stored as a server conversation.
+
+Requires `OPENAI_API_KEY`. When missing or `ASSISTANT_ENABLED=false`, the turn route returns `503` with `code: assistant_unavailable`, and `GET /api/auth/me` has `assistant_enabled: false`.
+
+Accepts only `user` and `assistant` roles (`system` and other roles are dropped). Each message is capped at 500 characters; the thread is capped at 20 messages. Oversize is `422`. Rate limit: 30 turns per user per hour (`429`, `code: assistant_rate_limited`). Child members can call this route.
+
+### `POST /api/families/{family_id}/assistant/turns`
+
+Auth + family membership.
+
+**Request**
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "what is left in groceries?" }
+  ]
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "assistant_text": "I can only help you add an expense.",
+  "proposal": null
+}
+```
+
+`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense.
+
+**Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
+
+---
+
 ## Receipts
 
 Upload a receipt photo, extract merchant / line items / total with OpenAI vision, then confirm to create an itemized expense (`source_type: "receipt"`).
@@ -1820,6 +1858,7 @@ async function api<T>(
 | DELETE | `/api/budgets/{budget_id}` | Yes (Parent/Owner) |
 | PATCH | `/api/expenses/{expense_id}` | Yes |
 | DELETE | `/api/expenses/{expense_id}` | Yes |
+| POST | `/api/families/{family_id}/assistant/turns` | Yes |
 | POST | `/api/families/{family_id}/receipts` | Yes |
 | GET | `/api/families/{family_id}/receipts` | Yes |
 | GET | `/api/receipts/{receipt_id}` | Yes |

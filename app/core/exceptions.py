@@ -38,6 +38,10 @@ def service_unavailable(detail: str = "Service unavailable", code: str = "servic
     return AppError(status.HTTP_503_SERVICE_UNAVAILABLE, detail, code)
 
 
+def too_many_requests(detail: str = "Too many requests", code: str = "rate_limited") -> AppError:
+    return AppError(status.HTTP_429_TOO_MANY_REQUESTS, detail, code)
+
+
 def error_body(exc: HTTPException) -> dict[str, Any]:
     if isinstance(exc.detail, dict) and "code" in exc.detail:
         return exc.detail

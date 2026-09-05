@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import (
+    assistant,
     auth,
     budget_subcategories,
     budgets,
@@ -82,6 +83,7 @@ def health() -> dict:
 
 
 app.include_router(auth.router)
+app.include_router(assistant.router)
 app.include_router(families.router)
 app.include_router(dashboard.router)
 app.include_router(events.router)

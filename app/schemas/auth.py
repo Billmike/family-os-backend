@@ -57,3 +57,4 @@ class UserOut(ORMModel):
     timezone: str | None = None
     created_at: datetime
     updated_at: datetime
+    assistant_enabled: bool = False
