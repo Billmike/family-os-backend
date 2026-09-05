@@ -1,7 +1,9 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.core.database import get_db
 from app.core.deps import get_current_user, require_family_member
 from app.models.family import FamilyMember
 from app.models.user import User
@@ -17,5 +19,11 @@ def propose_turn(
     data: AssistantTurnRequest,
     user: User = Depends(get_current_user),
     _: FamilyMember = Depends(require_family_member),
+    db: Session = Depends(get_db),
 ) -> AssistantTurnOut:
-    return assistant_service.run_turn(user_id=user.id, messages=data.messages)
+    return assistant_service.run_turn(
+        db=db,
+        family_id=family_id,
+        user=user,
+        messages=data.messages,
+    )

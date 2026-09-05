@@ -884,7 +884,7 @@ Prefer `GET /api/families/{family_id}/spend` for Expenses (all categories).
 
 ## Expenses
 
-Household spend ledger. Completing a shopping trip inserts a `Shopping` expense (`source_type: "shopping_session"`). Manual entries use `source_type: "manual"`. Receipt scans use `source_type: "receipt"` and link to a `Receipt` via `source_id`.
+Household spend ledger. Completing a shopping trip inserts a `Shopping` expense (`source_type: "shopping_session"`). Manual entries use `source_type: "manual"`. Assistant-confirmed entries use `source_type: "assistant"` and stay editable like manual rows. Receipt scans use `source_type: "receipt"` and link to a `Receipt` via `source_id`.
 
 Categories: `Shopping`, `Transportation`, `Housing`, `Utilities`, `Dining`, `Health`, `Childcare`, `Other`.
 
@@ -912,6 +912,7 @@ Create a manual expense.
 | `note` | Optional, max 500 |
 | `occurred_at` | Optional ISO datetime; defaults to now |
 | `currency` | Optional, 3-letter code, default `EUR` |
+| `source_type` | Optional, `manual` (default) or `assistant` |
 
 **Response `200`** — `ExpenseOut`. Broadcasts `expense.created`.
 
@@ -1314,12 +1315,29 @@ Auth + family membership.
 
 ```json
 {
-  "assistant_text": "I can only help you add an expense.",
-  "proposal": null
+  "assistant_text": "I drafted a Family expense.",
+  "proposal": {
+    "destination": "household",
+    "account_id": null,
+    "amount": "12.00",
+    "subcategory_id": "...",
+    "category": null,
+    "merchant": "Tesco",
+    "note": null,
+    "occurred_on": null,
+    "destination_explicit": false,
+    "account_id_explicit": false,
+    "amount_explicit": true,
+    "subcategory_id_explicit": false,
+    "category_explicit": false,
+    "merchant_explicit": true,
+    "note_explicit": false,
+    "occurred_on_explicit": false
+  }
 }
 ```
 
-`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense.
+`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense. Proposed ids that are not in this Family’s Subcategory catalog (or the caller’s Personal accounts) are stripped. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`.
 
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 

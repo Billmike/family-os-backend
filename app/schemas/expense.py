@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.models.expense import CREATE_SOURCE_TYPES, SOURCE_MANUAL
 from app.schemas.auth import ORMModel
 from app.schemas.budget import BudgetSummaryOut
 
@@ -25,6 +26,7 @@ class ExpenseCreate(BaseModel):
     note: str | None = Field(default=None, max_length=MAX_NOTE)
     occurred_at: datetime | None = None
     currency: str = Field(default="EUR", min_length=3, max_length=3)
+    source_type: str = SOURCE_MANUAL
 
     @field_validator("merchant", "note", mode="before")
     @classmethod
@@ -35,6 +37,13 @@ class ExpenseCreate(BaseModel):
     @classmethod
     def currency_upper(cls, value: str) -> str:
         return value.strip().upper()
+
+    @field_validator("source_type")
+    @classmethod
+    def source_type_allowed(cls, value: str) -> str:
+        if value not in CREATE_SOURCE_TYPES:
+            raise ValueError("source_type must be manual or assistant")
+        return value
 
 
 class ExpenseUpdate(BaseModel):

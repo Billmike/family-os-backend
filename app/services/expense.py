@@ -23,6 +23,7 @@ from app.services import budget_subcategory as subcategory_service
 from app.models.budget_group import GROUP_DIRECTIONS, OUTFLOW_GROUPS, is_outflow_group
 from app.models.budget_subcategory import BudgetSubcategory
 from app.models.expense import (
+    SOURCE_ASSISTANT,
     SOURCE_MANUAL,
     SOURCE_RECEIPT,
     SOURCE_SHOPPING_SESSION,
@@ -144,7 +145,7 @@ def get_expense(db: Session, expense_id: UUID) -> Expense:
     return expense
 
 
-_EDITABLE_SOURCES = (SOURCE_MANUAL, SOURCE_RECEIPT)
+_EDITABLE_SOURCES = (SOURCE_MANUAL, SOURCE_ASSISTANT, SOURCE_RECEIPT)
 
 
 def _require_editable(expense: Expense) -> None:
@@ -202,7 +203,7 @@ def create_expense(db: Session, family: Family, user: User, data: ExpenseCreate)
         note=data.note,
         occurred_at=occurred_at,
         created_by=user.id,
-        source_type=SOURCE_MANUAL,
+        source_type=data.source_type,
         source_id=None,
     )
     db.add(expense)

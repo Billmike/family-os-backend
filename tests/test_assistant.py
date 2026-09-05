@@ -160,7 +160,7 @@ def test_child_member_can_take_a_turn(
 def test_forged_system_role_is_dropped(client: TestClient, assistant_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[dict[str, str]]] = []
 
-    def _capture(*, messages: list[dict[str, str]]) -> AssistantModelResult:
+    def _capture(*, messages: list[dict[str, str]], **_kwargs) -> AssistantModelResult:
         seen.append(messages)
         return _fake_refuse()
 
@@ -267,3 +267,101 @@ def test_non_member_turn_is_rejected(client: TestClient) -> None:
         [{"role": "user", "content": "what is left in groceries?"}],
     )
     assert res.status_code == 404
+
+
+def _transport_id(client: TestClient, family_id: str, headers: dict) -> str:
+    groups = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()["groups"]
+    return next(
+        s["id"]
+        for group in groups
+        if group["group"] == "Fixed Expense"
+        for s in group["subcategories"]
+        if s["name"] == "Transport"
+    )
+
+
+def _propose_family_expense(subcategory_id: str, destination: str = "household") -> AssistantModelResult:
+    return AssistantModelResult(
+        assistant_text="I drafted a Family expense.",
+        tool_name="propose_expense",
+        tool_args={
+            "destination": destination,
+            "account_id": None,
+            "amount": 12,
+            "subcategory_id": subcategory_id,
+            "category": None,
+            "merchant": "Tesco",
+            "note": None,
+            "occurred_on": None,
+        },
+    )
+
+
+def test_spend_description_returns_family_proposal_and_creates_no_expense(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-propose@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "I spent €12 at Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_text"] == "I drafted a Family expense."
+    proposal = body["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "household"
+    assert proposal["amount"] == "12.00"
+    assert proposal["subcategory_id"] == transport_id
+    assert proposal["merchant"] == "Tesco"
+    assert proposal["amount_explicit"] is True
+    assert proposal["merchant_explicit"] is True
+    assert proposal["subcategory_id_explicit"] is False
+    assert proposal["occurred_on_explicit"] is False
+    assert proposal["destination_explicit"] is False
+
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+    month = spend.json()["current_month"]
+    listed = client.get(f"/api/families/{family_id}/expenses?month={month}", headers=owner)
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+def test_cross_family_subcategory_id_is_stripped(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-strip@example.com")
+    family_id = _create_family(client, owner)
+    other = auth_headers(client, "assistant-other-family@example.com")
+    other_family_id = _create_family(client, other)
+    foreign_id = _transport_id(client, other_family_id, other)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(foreign_id),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "I spent €12 at Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["subcategory_id"] is None
+    assert proposal["subcategory_id_explicit"] is False
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"

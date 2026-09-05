@@ -9,9 +9,11 @@ from app.core.database import Base
 from app.models.user import TimestampMixin
 
 SOURCE_MANUAL = "manual"
+SOURCE_ASSISTANT = "assistant"
 SOURCE_SHOPPING_SESSION = "shopping_session"
 SOURCE_RECEIPT = "receipt"
 SOURCE_BUDGET_LINE = "budget_line"
+CREATE_SOURCE_TYPES = frozenset({SOURCE_MANUAL, SOURCE_ASSISTANT})
 
 
 class Expense(Base, TimestampMixin):

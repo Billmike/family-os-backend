@@ -1436,6 +1436,47 @@ def test_manual_expense_crud_and_spend_breakdown(client: TestClient) -> None:
     assert current_after["entry_count"] == 1
 
 
+def test_assistant_expense_persists_and_stays_editable(client: TestClient) -> None:
+    headers = auth_headers(client, "assistant-ledger@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Assistant Ledger", "timezone": "UTC"},
+    ).json()["id"]
+    subs = client.get(f"/api/families/{family_id}/budget-subcategories", headers=headers).json()
+    transport = next(
+        s for g in subs["groups"] if g["group"] == "Fixed Expense" for s in g["subcategories"] if s["name"] == "Transport"
+    )
+    created = client.post(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        json={
+            "amount": "12.00",
+            "subcategory_id": transport["id"],
+            "merchant": "Tesco",
+            "source_type": "assistant",
+        },
+    )
+    assert created.status_code == 200, created.text
+    expense = created.json()
+    assert expense["source_type"] == "assistant"
+    assert expense["merchant"] == "Tesco"
+    assert float(expense["amount"]) == 12.00
+
+    patched = client.patch(
+        f"/api/expenses/{expense['id']}",
+        headers=headers,
+        json={"amount": "14.00", "note": "Corrected"},
+    )
+    assert patched.status_code == 200
+    assert float(patched.json()["amount"]) == 14.00
+    assert patched.json()["note"] == "Corrected"
+    assert patched.json()["source_type"] == "assistant"
+
+    deleted = client.delete(f"/api/expenses/{expense['id']}", headers=headers)
+    assert deleted.status_code == 204
+
+
 def test_list_expenses_rejects_invalid_month(client: TestClient) -> None:
     headers = auth_headers(client, "expense-month@example.com", name="Owner")
     family_id = client.post(
