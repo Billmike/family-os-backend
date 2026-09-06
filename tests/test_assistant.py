@@ -816,3 +816,58 @@ def test_named_account_wins_over_household_phrase(
     assert proposal["destination_explicit"] is True
     assert proposal["account_id"] == shared_id
     assert proposal["account_id_explicit"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_merchant", "user_fragment", "expected_merchant"),
+    [
+        ("miles", "miles", "Miles"),
+        ("TESCO", "TESCO", "Tesco"),
+        ("tesco extra", "tesco extra", "Tesco Extra"),
+        ("McDonald's", "McDonald's", "McDonald's"),
+        ("mcdonald's", "mcdonald's", "Mcdonald's"),
+        ("7-eleven", "7-eleven", "7-eleven"),
+        ("7-ELEVEN", "7-ELEVEN", "7-eleven"),
+        ("", None, None),
+    ],
+    ids=[
+        "miles",
+        "tesco-upper",
+        "tesco-extra",
+        "mcdonalds-mixed",
+        "mcdonalds-lower",
+        "seven-eleven-lower",
+        "seven-eleven-upper",
+        "empty",
+    ],
+)
+def test_proposal_merchant_follows_token_title_case(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    raw_merchant: str,
+    user_fragment: str | None,
+    expected_merchant: str | None,
+) -> None:
+    owner = auth_headers(client, f"assistant-merchant-{request.node.callspec.id}@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, merchant=raw_merchant or None),
+    )
+    user_content = f"I spent €12 at {user_fragment}" if user_fragment else "I spent €12"
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": user_content}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["merchant"] == expected_merchant
+    assert proposal["merchant_explicit"] is bool(expected_merchant)
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"

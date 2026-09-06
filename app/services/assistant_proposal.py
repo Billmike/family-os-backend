@@ -110,6 +110,23 @@ def _parse_text(value: object) -> str | None:
     return stripped or None
 
 
+def title_case_merchant(merchant: str | None) -> str | None:
+    if merchant is None:
+        return None
+    return " ".join(_title_case_merchant_token(token) for token in merchant.split())
+
+
+def _title_case_merchant_token(token: str) -> str:
+    letters = [ch for ch in token if ch.isalpha()]
+    if not letters:
+        return token
+    if not (all(ch.islower() for ch in letters) or all(ch.isupper() for ch in letters)):
+        return token
+    first, *rest = token
+    titled_first = first.upper() if first.isalpha() else first
+    return titled_first + "".join(ch.lower() if ch.isalpha() else ch for ch in rest)
+
+
 def destination_from_text(text: str, account_names: list[str]) -> tuple[str | None, bool]:
     named_account = any(_contains_token(text, name) for name in account_names)
     if named_account:
@@ -165,7 +182,7 @@ def proposal_from_tool(
     account_name = account_ids[account_id].name if account_id else None
 
     amount = _parse_amount(args.get("amount"))
-    merchant = _parse_text(args.get("merchant"))
+    merchant = title_case_merchant(_parse_text(args.get("merchant")))
     note = _parse_text(args.get("note"))
     category = _parse_text(args.get("category"))
     occurred_on = _parse_date(args.get("occurred_on"))
