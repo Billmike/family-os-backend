@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -18,7 +18,7 @@ from app.services.assistant import clear_turn_windows
 from app.services.assistant_model import AssistantModelResult
 from tests.conftest import auth_headers
 
-REFUSE_TEXT = "I can only help you add an expense."
+REFUSE_TEXT = "I can only help you add an expense, show expenses, add a task, or change an expense."
 DRAFT_TESCO = "I’ve drafted your Tesco expense below. Check it and tap Add expense."
 DRAFT_GENERIC = "I’ve drafted an expense below. Check it and tap Add expense."
 
@@ -2892,5 +2892,771 @@ def test_personal_task_category_is_not_personal_unavailable(
     assert proposal["category_explicit"] is True
     assert "personal account" not in body["assistant_text"].casefold()
     assert _tasks(client, family_id, owner) == []
+
+
+DRAFT_CHANGE = "I found this expense. Check the card to save or delete."
+ASK_WHICH_EXPENSE = "Which expense do you want to change?"
+ASK_TAP_ROW = "Tap the row you want to change."
+CANNOT_CHANGE_HERE = "That expense can't be changed here."
+ASK_CHANGE_WINDOW = "I can change an expense in one month or one budget period. Which do you want?"
+
+
+def _propose_expense_change(
+    *,
+    merchant: str | None = "Tesco",
+    amount: float | None = None,
+    occurred_on: str | None = None,
+    expense_id: str | None = None,
+    destination: str | None = "household",
+    account_id: str | None = None,
+    patch_amount: float | None = None,
+    patch_merchant: str | None = None,
+    patch_note: str | None = None,
+    patch_subcategory_id: str | None = None,
+    patch_category: str | None = None,
+    patch_occurred_on: str | None = None,
+    assistant_text: str = "",
+) -> AssistantModelResult:
+    return AssistantModelResult(
+        assistant_text=assistant_text,
+        tool_name="propose_expense_change",
+        tool_args={
+            "destination": destination,
+            "account_id": account_id,
+            "merchant": merchant,
+            "amount": amount,
+            "occurred_on": occurred_on,
+            "expense_id": expense_id,
+            "patch_amount": patch_amount,
+            "patch_merchant": patch_merchant,
+            "patch_note": patch_note,
+            "patch_subcategory_id": patch_subcategory_id,
+            "patch_category": patch_category,
+            "patch_occurred_on": patch_occurred_on,
+        },
+    )
+
+
+def test_unique_writable_match_returns_change_proposal_and_writes_nothing(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-unique@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    tesco = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+        note="Weekly shop",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(patch_amount=15),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco to €15"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    change = body["change_proposal"]
+    assert change is not None
+    assert change["expense_id"] == tesco["id"]
+    assert change["destination"] == "household"
+    assert change["amount"] == "15.00"
+    assert change["amount_explicit"] is True
+    assert change["merchant"] == "Tesco"
+    assert change["merchant_explicit"] is False
+    assert change["subcategory_id"] == transport_id
+    assert change["note"] == "Weekly shop"
+    assert change["occurred_on"] == "2026-09-06"
+    assert change["writable"] is True
+    assert body["proposal"] is None
+    assert body["task_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["assistant_text"] == DRAFT_CHANGE
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert _period_expenses(client, family_id, owner, period_id) == before
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_several_matches_return_expense_list_not_a_guess(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-several@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    older = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="8.00",
+        merchant="Tesco Extra",
+        occurred_at="2026-09-01T10:00:00Z",
+    )
+    newer = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="4.00",
+        merchant="Aldi",
+        occurred_at="2026-09-05T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["proposal"] is None
+    expense_list = body["expense_list"]
+    assert expense_list is not None
+    assert expense_list["count"] == 2
+    assert expense_list["total"] == "20.00"
+    assert [row["id"] for row in expense_list["rows"]] == [newer["id"], older["id"]]
+    assert _period_expenses(client, family_id, owner, period_id) == before
+
+
+def test_zero_matches_names_the_window_and_returns_no_card(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-zero@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Aldi",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "delete the Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["proposal"] is None
+    assert "2026-09" in body["assistant_text"]
+    assert "matching" in body["assistant_text"].casefold()
+    assert _period_expenses(client, family_id, owner, period_id) == before
+
+
+def test_unique_non_writable_match_returns_no_card(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
+) -> None:
+    owner = auth_headers(client, "assistant-change-locked@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    user = db_session.query(User).filter(User.email == "assistant-change-locked@example.com").one()
+    receipt = Expense(
+        family_id=UUID(family_id),
+        amount=Decimal("7.50"),
+        currency="EUR",
+        subcategory_id=UUID(transport_id),
+        merchant="REWE",
+        occurred_at=datetime.now(timezone.utc),
+        created_by=user.id,
+        source_type=SOURCE_RECEIPT,
+    )
+    db_session.add(receipt)
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(merchant="REWE"),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the REWE"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["assistant_text"] == CANNOT_CHANGE_HERE
+    assert _period_expenses(client, family_id, owner, period_id) == before
+
+
+def test_unique_shopping_trip_match_returns_no_card(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-shopping@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    _complete_shopping_trip(client, family_id, owner, "5.40")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(merchant=None, amount=5.4),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the €5.40 expense"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["assistant_text"] == CANNOT_CHANGE_HERE
+    assert _period_expenses(client, family_id, owner, period_id) == before
+
+
+def test_change_without_merchant_amount_or_date_asks_what_to_change(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-identity@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(merchant=None),
+    )
+    before = _period_expenses(client, family_id, owner, period_id)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "delete an expense"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["assistant_text"] == ASK_WHICH_EXPENSE
+    assert _period_expenses(client, family_id, owner, period_id) == before
+
+
+def test_merchant_substring_and_amount_match_exactly(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-substring@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    extra = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco Extra",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.50",
+        merchant="Tesco Extra",
+        occurred_at="2026-09-05T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(amount=12),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the tesco €12"}],
+    )
+    assert res.status_code == 200, res.text
+    change = res.json()["change_proposal"]
+    assert change is not None
+    assert change["expense_id"] == extra["id"]
+    assert change["amount"] == "12.00"
+    assert res.json()["expense_list"] is None
+
+
+def test_model_supplied_expense_id_is_ignored(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-ignore-id@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    tesco = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    aldi = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="15.00",
+        merchant="Aldi",
+        occurred_at="2026-09-05T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(expense_id=aldi["id"]),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    change = res.json()["change_proposal"]
+    assert change is not None
+    assert change["expense_id"] == tesco["id"]
+    assert change["expense_id"] != aldi["id"]
+
+
+def test_household_change_does_not_match_personal_row(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-isolation@example.com")
+    family_id = _create_family(client, owner)
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    household = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    personal = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(),
+    )
+
+    household_res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the household Tesco"}],
+        destination_hint="household",
+    )
+    assert household_res.status_code == 200, household_res.text
+    household_change = household_res.json()["change_proposal"]
+    assert household_change is not None
+    assert household_change["expense_id"] == household["id"]
+    assert household_change["expense_id"] != personal["id"]
+    assert household_change["destination"] == "household"
+
+    personal_res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco on Fun"}],
+        destination_hint="personal",
+    )
+    assert personal_res.status_code == 200, personal_res.text
+    personal_change = personal_res.json()["change_proposal"]
+    assert personal_change is not None
+    assert personal_change["expense_id"] == personal["id"]
+    assert personal_change["destination"] == "personal"
+    assert personal_change["account_id"] == account_id
+    assert _period_expenses(client, family_id, owner, period_id)[0]["amount"] == "12.00"
+    assert _account_expenses(client, account_id, owner, month)[0]["amount"] == "12.00"
+
+
+def test_change_explicit_follows_user_text_not_model(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-explicit@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    tesco = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(patch_amount=15),
+    )
+
+    named = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco to €15"}],
+    )
+    assert named.status_code == 200, named.text
+    named_change = named.json()["change_proposal"]
+    assert named_change is not None
+    assert named_change["expense_id"] == tesco["id"]
+    assert named_change["amount"] == "15.00"
+    assert named_change["amount_explicit"] is True
+
+    guessed = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco"}],
+    )
+    assert guessed.status_code == 200, guessed.text
+    guessed_change = guessed.json()["change_proposal"]
+    assert guessed_change is not None
+    assert guessed_change["expense_id"] == tesco["id"]
+    assert guessed_change["amount"] == "15.00"
+    assert guessed_change["amount_explicit"] is False
+
+
+def test_change_proposal_never_returns_refuse_string(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-refuse@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(assistant_text=REFUSE_TEXT),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is not None
+    assert body["assistant_text"] == DRAFT_CHANGE
+    assert body["assistant_text"] != REFUSE_TEXT
+
+
+def test_tuesday_outside_current_window_asks_and_does_not_scan(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-tuesday@example.com")
+    family_id = _create_family(client, owner)
+    today = date.today()
+    period = _create_period(
+        client,
+        family_id,
+        owner,
+        label_month="2026-09",
+        start_date=today.isoformat(),
+        end_date=today.isoformat(),
+    )
+    transport_id = _transport_id(client, family_id, owner)
+    outside = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-08-15T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(),
+    )
+    weekday = (today - timedelta(days=1)).strftime("%A")
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": f"change {weekday}'s Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["assistant_text"] == ASK_CHANGE_WINDOW
+    listed = _period_expenses(client, family_id, owner, period["id"])
+    assert outside["id"] not in {row["id"] for row in listed}
+
+
+def test_typed_follow_up_asks_to_tap_the_row(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-tap@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(),
+    )
+
+    second = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "the second one"}],
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["change_proposal"] is None
+    assert second.json()["expense_list"] is None
+    assert second.json()["assistant_text"] == ASK_TAP_ROW
+
+    that_tesco = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "that Tesco"}],
+    )
+    assert that_tesco.status_code == 200, that_tesco.text
+    assert that_tesco.json()["assistant_text"] == ASK_TAP_ROW
+    assert that_tesco.json()["change_proposal"] is None
+
+    change_that = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change that Tesco"}],
+    )
+    assert change_that.status_code == 200, change_that.text
+    assert change_that.json()["assistant_text"] == ASK_TAP_ROW
+    assert change_that.json()["change_proposal"] is None
+
+    patched = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change that Tesco to €15"}],
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["change_proposal"] is not None
+    assert patched.json()["change_proposal"]["amount"] == "12.00"
+
+
+def test_two_asks_apply_first_intent_and_name_the_other(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-two-asks@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    transport_id = _transport_id(client, family_id, owner)
+    tesco = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(
+            patch_amount=15,
+            assistant_text="I found the Tesco. You can ask me to add a task next.",
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco to €15 and add a task to take bins out"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["change_proposal"] is not None
+    assert body["change_proposal"]["expense_id"] == tesco["id"]
+    assert body["task_proposal"] is None
+    assert body["proposal"] is None
+    assert "task" in body["assistant_text"].casefold()
+
+
+def test_named_window_and_date_match_exactly(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-change-named-window@example.com")
+    family_id = _create_family(client, owner)
+    _create_current_period(client, family_id, owner, "2026-09")
+    _create_period(
+        client,
+        family_id,
+        owner,
+        label_month="2026-08",
+        start_date="2026-08-01",
+        end_date="2026-08-31",
+    )
+    transport_id = _transport_id(client, family_id, owner)
+    september = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-09-06T10:00:00Z",
+    )
+    august_early = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-08-01T10:00:00Z",
+    )
+    august = _add_family_expense(
+        client,
+        family_id,
+        owner,
+        transport_id,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at="2026-08-15T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_expense_change(occurred_on="2026-08-15"),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "change the Tesco on 2026-08-15"}],
+    )
+    assert res.status_code == 200, res.text
+    change = res.json()["change_proposal"]
+    assert change is not None
+    assert change["expense_id"] == august["id"]
+    assert change["expense_id"] != september["id"]
+    assert change["expense_id"] != august_early["id"]
+    assert change["occurred_on"] == "2026-08-15"
+
 
 

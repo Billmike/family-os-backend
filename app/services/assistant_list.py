@@ -182,14 +182,14 @@ def _resolve_personal_account(
     return None
 
 
-def _resolve_personal_month(user_text: str, family: Family) -> str:
+def named_month_label(user_text: str, family: Family) -> str | None:
     named = _NAMED_YEAR_MONTH.search(user_text)
     if named is not None:
         return named.group(1)
     now = family_now(family.timezone)
     match = _NAMED_MONTH.search(user_text)
     if match is None:
-        return f"{now.year:04d}-{now.month:02d}"
+        return None
     month_name = (match.group(1) or match.group(2)).casefold()
     month_num = _MONTH_INDEX[month_name]
     year = now.year
@@ -200,6 +200,14 @@ def _resolve_personal_month(user_text: str, family: Family) -> str:
         if year_match is not None:
             year = int(year_match.group(1))
     return f"{year:04d}-{month_num:02d}"
+
+
+def _resolve_personal_month(user_text: str, family: Family) -> str:
+    named = named_month_label(user_text, family)
+    if named is not None:
+        return named
+    now = family_now(family.timezone)
+    return f"{now.year:04d}-{now.month:02d}"
 
 
 def _resolve_list_destination(

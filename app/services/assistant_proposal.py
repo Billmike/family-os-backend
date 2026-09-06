@@ -104,7 +104,7 @@ def _contains_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in lowered for phrase in phrases)
 
 
-def _contains_amount(text: str, amount: Decimal) -> bool:
+def contains_amount(text: str, amount: Decimal) -> bool:
     money = as_money(amount)
     haystack = text.replace(",", ".")
     if money == money.to_integral():
@@ -155,6 +155,12 @@ def _parse_text(value: object) -> str | None:
         return None
     stripped = str(value).strip()
     return stripped or None
+
+
+parse_uuid = _parse_uuid
+parse_amount = _parse_amount
+parse_date = _parse_date
+parse_text = _parse_text
 
 
 def title_case_merchant(merchant: str | None) -> str | None:
@@ -245,7 +251,7 @@ def proposal_from_tool(
         occurred_on=occurred_on,
         destination_explicit=destination_explicit,
         account_id_explicit=bool(account_name and contains_token(user_text, account_name)),
-        amount_explicit=bool(amount is not None and _contains_amount(user_text, amount)),
+        amount_explicit=bool(amount is not None and contains_amount(user_text, amount)),
         subcategory_id_explicit=bool(subcategory_name and contains_token(user_text, subcategory_name)),
         category_explicit=bool(category and contains_token(user_text, category)),
         merchant_explicit=bool(merchant and contains_token(user_text, merchant)),

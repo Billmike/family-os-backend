@@ -12,10 +12,12 @@ from app.schemas.assistant import (
     AssistantDestination,
     AssistantMessageIn,
     AssistantTurnOut,
+    ExpenseChangeProposal,
     ExpenseList,
     ExpenseProposal,
     TaskProposal,
 )
+from app.services import assistant_change
 from app.services import assistant_list
 from app.services import assistant_model
 from app.services import assistant_proposal
@@ -99,6 +101,9 @@ def run_turn(
     list_message = None
     task_proposal = None
     task_message = None
+    change_proposal = None
+    change_message = None
+    family = db.get(Family, family_id)
     if result.tool_name == "propose_expense" and result.tool_args is not None:
         proposal = assistant_proposal.proposal_from_tool(
             result.tool_args,
@@ -107,7 +112,6 @@ def run_turn(
             accounts=catalog_data.accounts,
         )
     elif result.tool_name == "list_expenses" and result.tool_args is not None:
-        family = db.get(Family, family_id)
         if family is not None:
             listed = assistant_list.list_from_tool(
                 db,
@@ -128,6 +132,20 @@ def run_turn(
         )
         task_proposal = drafted.task_proposal
         task_message = drafted.message
+    elif result.tool_name == "propose_expense_change" and result.tool_args is not None:
+        if family is not None:
+            changed = assistant_change.change_from_tool(
+                db,
+                family=family,
+                user=user,
+                catalog=catalog_data,
+                user_text=user_text,
+                tool_args=result.tool_args,
+                destination_hint=destination_hint,
+            )
+            change_proposal = changed.change_proposal
+            expense_list = changed.expense_list
+            change_message = changed.message
     return AssistantTurnOut(
         assistant_text=_resolve_assistant_text(
             result.assistant_text,
@@ -136,11 +154,13 @@ def run_turn(
             list_message,
             task_proposal,
             task_message,
+            change_proposal,
+            change_message,
         ),
         proposal=proposal,
         task_proposal=task_proposal,
         expense_list=expense_list,
-        change_proposal=None,
+        change_proposal=change_proposal,
     )
 
 
@@ -151,11 +171,15 @@ def _resolve_assistant_text(
     list_message: str | None = None,
     task_proposal: TaskProposal | None = None,
     task_message: str | None = None,
+    change_proposal: ExpenseChangeProposal | None = None,
+    change_message: str | None = None,
 ) -> str:
     if list_message:
         return list_message
     if task_message:
         return task_message
+    if change_message:
+        return change_message
     text = (model_text or "").strip()
     if expense_list is not None:
         return assistant_list.list_text(expense_list)
@@ -163,6 +187,10 @@ def _resolve_assistant_text(
         if text and text != assistant_model.DEFAULT_REFUSE:
             return text
         return assistant_model.DRAFT_TASK
+    if change_proposal is not None:
+        if text and text != assistant_model.DEFAULT_REFUSE:
+            return text
+        return assistant_model.DRAFT_CHANGE
     if proposal is None:
         return text or assistant_model.DEFAULT_REFUSE
     if text and text != assistant_model.DEFAULT_REFUSE:

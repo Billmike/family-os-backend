@@ -1345,7 +1345,7 @@ Auth + family membership.
 }
 ```
 
-`proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`. Confirming a Task proposal uses `POST /api/families/{family_id}/tasks` as the signed-in member (due 17:00 Family timezone; `medium` → `normal`; weekly recurrence or none). No Task provenance field.
+`proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates, patches, or deletes a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`. Confirming a Task proposal uses `POST /api/families/{family_id}/tasks` as the signed-in member (due 17:00 Family timezone; `medium` → `normal`; weekly recurrence or none). No Task provenance field.
 
 When the member described a Task, `task_proposal` is a draft. Title must be non-empty after strip or there is no card. Unknown assignee names ask who; unknown assignee ids are stripped. Defaults when not named: assignee is the caller, due today, priority medium, category Household, recurrence off. Due on the card is only `today` or `tomorrow`. Empty model text with a Task proposal uses `I’ve drafted a task below. Check it and tap Add task.` and is never the refuse fallback.
 
@@ -1410,6 +1410,39 @@ When the member asked for a Personal Expense list, `expense_list` is every row o
 ```
 
 No current budget period returns text that Budget is not set up, `expense_list` null, and does not create a period. Named Personal with zero accounts uses the existing Personal-unavailable copy. “Last week” or a date range asks for one month or one period and returns no list.
+
+When the member asked to change or delete an existing expense, `change_proposal` is the current writable row plus any named patch fields. Identity is merchant (case-insensitive substring), amount, and/or date in one window — never a model-supplied expense id. A unique writable match returns `change_proposal` and writes nothing. Several matches return `expense_list` of those rows (`change_proposal` null). Zero matches or a unique shopping-trip, budget-line, or receipt row return no card. Empty model text with a change proposal uses `I found this expense. Check the card to save or delete.` and is never the refuse fallback. Empty model text with no result uses `I can only help you add an expense, show expenses, add a task, or change an expense.`
+
+```json
+{
+  "assistant_text": "I found this expense. Check the card to save or delete.",
+  "proposal": null,
+  "task_proposal": null,
+  "expense_list": null,
+  "change_proposal": {
+    "expense_id": "...",
+    "destination": "household",
+    "account_id": null,
+    "amount": "15.00",
+    "subcategory_id": "...",
+    "category": null,
+    "merchant": "Tesco",
+    "note": "Weekly shop",
+    "occurred_on": "2026-09-06",
+    "amount_explicit": true,
+    "subcategory_id_explicit": false,
+    "category_explicit": false,
+    "merchant_explicit": false,
+    "note_explicit": false,
+    "occurred_on_explicit": false,
+    "destination_explicit": false,
+    "account_id_explicit": false,
+    "writable": true
+  }
+}
+```
+
+Confirming Save uses the existing Family or Personal PATCH. Delete uses the existing DELETE. The turn itself never patches or deletes.
 
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 
