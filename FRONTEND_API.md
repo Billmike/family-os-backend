@@ -1347,6 +1347,41 @@ Auth + family membership.
 
 `proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`.
 
+When the member asked for a Household Expense list, `expense_list` is the Family outflows for one budget period (current when unnamed). The server loads the rows; `rows` in tool args are ignored. `count` and `total` match those outflow rows. Empty windows still return the card (`count` 0, `total` `"0.00"`). Assistant text names Household and the period and never includes amounts or totals.
+
+```json
+{
+  "assistant_text": "Here are the household expenses for 2026-09.",
+  "proposal": null,
+  "task_proposal": null,
+  "expense_list": {
+    "destination": "household",
+    "account_id": null,
+    "account_name": null,
+    "month": null,
+    "period_id": "...",
+    "period_label": "2026-09",
+    "count": 2,
+    "total": "20.00",
+    "currency": "EUR",
+    "rows": [
+      {
+        "id": "...",
+        "occurred_on": "2026-09-06",
+        "merchant": "Tesco",
+        "amount": "12.00",
+        "category_or_subcategory_label": "Transport",
+        "source_type": "assistant",
+        "writable": true
+      }
+    ]
+  },
+  "change_proposal": null
+}
+```
+
+No current budget period returns text that Budget is not set up, `expense_list` null, and does not create a period. “Last week” or a date range asks for one period and returns no list.
+
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 
 ---

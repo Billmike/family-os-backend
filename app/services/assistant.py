@@ -6,8 +6,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.exceptions import service_unavailable, too_many_requests
+from app.models.family import Family
 from app.models.user import User
-from app.schemas.assistant import AssistantDestination, AssistantMessageIn, AssistantTurnOut, ExpenseProposal
+from app.schemas.assistant import (
+    AssistantDestination,
+    AssistantMessageIn,
+    AssistantTurnOut,
+    ExpenseList,
+    ExpenseProposal,
+)
+from app.services import assistant_list
 from app.services import assistant_model
 from app.services import assistant_proposal
 
@@ -81,6 +89,8 @@ def run_turn(
     catalog = assistant_proposal.format_catalog(catalog_data)
     result = assistant_model.complete_assistant_turn(messages=kept, catalog=catalog)
     proposal = None
+    expense_list = None
+    list_message = None
     if result.tool_name == "propose_expense" and result.tool_args is not None:
         proposal = assistant_proposal.proposal_from_tool(
             result.tool_args,
@@ -88,17 +98,44 @@ def run_turn(
             subcategories=catalog_data.subcategories,
             accounts=catalog_data.accounts,
         )
+    elif result.tool_name == "list_expenses" and result.tool_args is not None:
+        family = db.get(Family, family_id)
+        if family is not None:
+            listed = assistant_list.family_list_from_tool(
+                db,
+                family=family,
+                catalog=catalog_data,
+                user_text=user_text,
+                tool_args=result.tool_args,
+                destination_hint=destination_hint,
+            )
+            expense_list = listed.expense_list
+            list_message = listed.message
     return AssistantTurnOut(
-        assistant_text=_resolve_assistant_text(result.assistant_text, proposal),
+        assistant_text=_resolve_assistant_text(
+            result.assistant_text,
+            proposal,
+            expense_list,
+            list_message,
+        ),
         proposal=proposal,
         task_proposal=None,
-        expense_list=None,
+        expense_list=expense_list,
         change_proposal=None,
     )
 
 
-def _resolve_assistant_text(model_text: str, proposal: ExpenseProposal | None) -> str:
+def _resolve_assistant_text(
+    model_text: str,
+    proposal: ExpenseProposal | None,
+    expense_list: ExpenseList | None = None,
+    list_message: str | None = None,
+) -> str:
+    if list_message:
+        return list_message
     text = (model_text or "").strip()
+    if expense_list is not None:
+        return assistant_list.household_list_text(expense_list)
     if proposal is None:
         return text or assistant_model.DEFAULT_REFUSE
     if text and text != assistant_model.DEFAULT_REFUSE:

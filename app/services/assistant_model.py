@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 
+RECOGNIZED_TOOLS = frozenset({"propose_expense", "list_expenses"})
 DEFAULT_REFUSE = "I can only help you add an expense."
 DRAFT_WITHOUT_MERCHANT = "I’ve drafted an expense below. Check it and tap Add expense."
 
@@ -14,11 +15,12 @@ def draft_confirmation(merchant: str | None) -> str:
         return f"I’ve drafted your {merchant} expense below. Check it and tap Add expense."
     return DRAFT_WITHOUT_MERCHANT
 
-SYSTEM_PROMPT = """You help a family member add one expense. That is your only job.
-If the latest user message is not about a spend they already made, refuse in one short sentence that names what they asked and that you can only help add an expense.
-Do not answer budget questions, shopping lists, email, calendar, or anything else.
-You may call propose_expense at most once when they described a spend. Never invent another tool.
-When you call propose_expense, write one plain-text sentence that describes this spend, asks the member to check the card and add, and does not claim the row is already written. Do not say added, saved, or done."""
+SYSTEM_PROMPT = """You help a family member add one expense or show an Expense list. That is your only job.
+If the latest user message is not about a spend they already made, a household expense list, or a personal expense list, refuse in one short sentence that names what they asked and that you can only help add an expense.
+Do not answer budget leftover, shopping lists, email, calendar, or anything else.
+You may call one tool. Apply the first tool only. Never invent another tool.
+When they described a spend, call propose_expense. Write one plain-text sentence that describes this spend, asks the member to check the card and add, and does not claim the row is already written. Do not say added, saved, or done.
+When they asked what the household spent in a budget period, call list_expenses with destination household. Omit period_id for the current period. If they named a catalog period label, pass that period_id. Do not invent rows. Do not put amounts or totals in your sentence. Name Household and the period."""
 
 PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
     "type": "function",
@@ -55,6 +57,28 @@ PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
     },
 }
 
+LIST_EXPENSES_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_expenses",
+        "description": "Show Family or Personal expenses in one window. Do not invent rows.",
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "destination": {
+                    "type": ["string", "null"],
+                    "enum": ["household", "personal", None],
+                },
+                "account_id": {"type": ["string", "null"]},
+                "month": {"type": ["string", "null"]},
+                "period_id": {"type": ["string", "null"]},
+            },
+            "required": ["destination", "account_id", "month", "period_id"],
+        },
+    },
+}
+
 
 class AssistantModelResult(BaseModel):
     assistant_text: str
@@ -78,7 +102,7 @@ def complete_assistant_turn(*, messages: list[dict[str, str]], catalog: str = ""
         response = client.chat.completions.create(
             model=settings.openai_model,
             messages=[{"role": "system", "content": SYSTEM_PROMPT + catalog_block}, *messages],
-            tools=[PROPOSE_EXPENSE_TOOL],
+            tools=[PROPOSE_EXPENSE_TOOL, LIST_EXPENSES_TOOL],
             tool_choice="auto",
             reasoning_effort="none",
         )
@@ -90,17 +114,19 @@ def complete_assistant_turn(*, messages: list[dict[str, str]], catalog: str = ""
     if not response.choices:
         return AssistantModelResult(assistant_text=DEFAULT_REFUSE)
     choice = response.choices[0].message
-    tool_calls = choice.tool_calls or []
-    first = tool_calls[0] if tool_calls else None
-    tool_name = first.function.name if first else None
-    tool_args: dict[str, Any] | None = None
-    if first and tool_name == "propose_expense":
-        try:
-            parsed = json.loads(first.function.arguments or "{}")
-        except json.JSONDecodeError:
-            parsed = None
-        tool_args = parsed if isinstance(parsed, dict) else None
-    else:
-        tool_name = None
+    tool_name, tool_args = _first_recognized_tool(choice.tool_calls or [])
     text = (choice.content or "").strip() or DEFAULT_REFUSE
     return AssistantModelResult(assistant_text=text, tool_name=tool_name, tool_args=tool_args)
+
+
+def _first_recognized_tool(tool_calls: list) -> tuple[str | None, dict[str, Any] | None]:
+    for call in tool_calls:
+        name = call.function.name if call and call.function else None
+        if name not in RECOGNIZED_TOOLS:
+            continue
+        try:
+            parsed = json.loads(call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            parsed = None
+        return name, parsed if isinstance(parsed, dict) else None
+    return None, None
