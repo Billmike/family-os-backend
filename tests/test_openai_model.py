@@ -50,6 +50,7 @@ def test_assistant_turn_sends_luna_without_temperature(
 
     kwargs = client.chat.completions.create.call_args.kwargs
     assert kwargs["model"] == "gpt-5.6-luna"
+    assert kwargs["reasoning_effort"] == "none"
     assert "temperature" not in kwargs
 
 
