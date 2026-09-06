@@ -16,6 +16,8 @@ from app.services.assistant_model import AssistantModelResult
 from tests.conftest import auth_headers
 
 REFUSE_TEXT = "I can only help you add an expense."
+DRAFT_TESCO = "I’ve drafted your Tesco expense below. Check it and tap Add expense."
+DRAFT_GENERIC = "I’ve drafted an expense below. Check it and tap Add expense."
 
 
 def _fake_refuse(**_kwargs) -> AssistantModelResult:
@@ -280,9 +282,15 @@ def _transport_id(client: TestClient, family_id: str, headers: dict) -> str:
     )
 
 
-def _propose_family_expense(subcategory_id: str, destination: str = "household") -> AssistantModelResult:
+def _propose_family_expense(
+    subcategory_id: str,
+    destination: str = "household",
+    *,
+    assistant_text: str = "I drafted a Family expense.",
+    merchant: str | None = "Tesco",
+) -> AssistantModelResult:
     return AssistantModelResult(
-        assistant_text="I drafted a Family expense.",
+        assistant_text=assistant_text,
         tool_name="propose_expense",
         tool_args={
             "destination": destination,
@@ -290,7 +298,7 @@ def _propose_family_expense(subcategory_id: str, destination: str = "household")
             "amount": 12,
             "subcategory_id": subcategory_id,
             "category": None,
-            "merchant": "Tesco",
+            "merchant": merchant,
             "note": None,
             "occurred_on": None,
         },
@@ -336,6 +344,119 @@ def test_spend_description_returns_family_proposal_and_creates_no_expense(
     listed = client.get(f"/api/families/{family_id}/expenses?month={month}", headers=owner)
     assert listed.status_code == 200
     assert listed.json() == []
+    assert body["assistant_text"] != REFUSE_TEXT
+
+
+def test_empty_model_content_and_proposal_uses_merchant_template(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-empty-merchant@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, assistant_text=""),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "I spent €12 at Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_text"] == DRAFT_TESCO
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert body["proposal"] is not None
+    assert body["proposal"]["merchant"] == "Tesco"
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+
+
+def test_empty_model_content_and_proposal_without_merchant_uses_generic_template(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-empty-generic@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(
+            transport_id, assistant_text="", merchant=None
+        ),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_text"] == DRAFT_GENERIC
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert body["proposal"] is not None
+    assert body["proposal"]["merchant"] is None
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+
+
+def test_empty_model_content_and_no_tool_uses_refuse_fallback(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-empty-refuse@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: AssistantModelResult(assistant_text=""),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "what is left in groceries?"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_text"] == REFUSE_TEXT
+    assert body["proposal"] is None
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+
+
+def test_proposal_turn_never_returns_refuse_string(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-refuse-proposal@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(
+            transport_id, assistant_text=REFUSE_TEXT
+        ),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "I spent €12 at Tesco"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is not None
+    assert body["assistant_text"] == DRAFT_TESCO
+    assert body["assistant_text"] != REFUSE_TEXT
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
 
 
 def test_cross_family_subcategory_id_is_stripped(

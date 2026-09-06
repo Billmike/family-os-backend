@@ -6,11 +6,19 @@ from pydantic import BaseModel
 from app.core.config import get_settings
 
 DEFAULT_REFUSE = "I can only help you add an expense."
+DRAFT_WITHOUT_MERCHANT = "I’ve drafted an expense below. Check it and tap Add expense."
+
+
+def draft_confirmation(merchant: str | None) -> str:
+    if merchant:
+        return f"I’ve drafted your {merchant} expense below. Check it and tap Add expense."
+    return DRAFT_WITHOUT_MERCHANT
 
 SYSTEM_PROMPT = """You help a family member add one expense. That is your only job.
-If the latest user message is not about a spend they already made, refuse in one short sentence.
+If the latest user message is not about a spend they already made, refuse in one short sentence that names what they asked and that you can only help add an expense.
 Do not answer budget questions, shopping lists, email, calendar, or anything else.
-You may call propose_expense at most once when they described a spend. Never invent another tool."""
+You may call propose_expense at most once when they described a spend. Never invent another tool.
+When you call propose_expense, write one plain-text sentence that describes this spend, asks the member to check the card and add, and does not claim the row is already written. Do not say added, saved, or done."""
 
 PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
     "type": "function",

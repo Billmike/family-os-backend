@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import service_unavailable, too_many_requests
 from app.models.user import User
-from app.schemas.assistant import AssistantMessageIn, AssistantTurnOut
+from app.schemas.assistant import AssistantMessageIn, AssistantTurnOut, ExpenseProposal
 from app.services import assistant_model
 from app.services import assistant_proposal
 
@@ -88,4 +88,16 @@ def run_turn(
             subcategories=subcategories,
             accounts=accounts,
         )
-    return AssistantTurnOut(assistant_text=result.assistant_text, proposal=proposal)
+    return AssistantTurnOut(
+        assistant_text=_resolve_assistant_text(result.assistant_text, proposal),
+        proposal=proposal,
+    )
+
+
+def _resolve_assistant_text(model_text: str, proposal: ExpenseProposal | None) -> str:
+    text = (model_text or "").strip()
+    if proposal is None:
+        return text or assistant_model.DEFAULT_REFUSE
+    if text and text != assistant_model.DEFAULT_REFUSE:
+        return text
+    return assistant_model.draft_confirmation(proposal.merchant)
