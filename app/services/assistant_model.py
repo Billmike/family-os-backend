@@ -5,9 +5,10 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 
-RECOGNIZED_TOOLS = frozenset({"propose_expense", "list_expenses"})
+RECOGNIZED_TOOLS = frozenset({"propose_expense", "list_expenses", "propose_task"})
 DEFAULT_REFUSE = "I can only help you add an expense."
 DRAFT_WITHOUT_MERCHANT = "I’ve drafted an expense below. Check it and tap Add expense."
+DRAFT_TASK = "I’ve drafted a task below. Check it and tap Add task."
 
 
 def draft_confirmation(merchant: str | None) -> str:
@@ -15,13 +16,14 @@ def draft_confirmation(merchant: str | None) -> str:
         return f"I’ve drafted your {merchant} expense below. Check it and tap Add expense."
     return DRAFT_WITHOUT_MERCHANT
 
-SYSTEM_PROMPT = """You help a family member add one expense or show an Expense list. That is your only job.
-If the latest user message is not about a spend they already made, a household expense list, or a personal expense list, refuse in one short sentence that names what they asked and that you can only help add an expense.
+SYSTEM_PROMPT = """You help a family member add one expense, show an Expense list, or draft a Task. That is your only job.
+If the latest user message is not about a spend they already made, a household expense list, a personal expense list, or adding a task, refuse in one short sentence that names what they asked and that you can only help add an expense.
 Do not answer budget leftover, shopping lists, email, calendar, or anything else.
 You may call one tool. Apply the first tool only. Never invent another tool.
 When they described a spend, call propose_expense. Write one plain-text sentence that describes this spend, asks the member to check the card and add, and does not claim the row is already written. Do not say added, saved, or done.
 When they asked what the household spent in a budget period, call list_expenses with destination household. Omit period_id for the current period. If they named a catalog period label, pass that period_id. Do not invent rows. Do not put amounts or totals in your sentence. Name Household and the period.
-When they asked what they spent on a Personal account, call list_expenses with destination personal. Omit month for the current calendar month. If they named a month, pass that month as YYYY-MM. Name the Personal account and the month. Do not invent rows. Do not put amounts or totals in your sentence."""
+When they asked what they spent on a Personal account, call list_expenses with destination personal. Omit month for the current calendar month. If they named a month, pass that month as YYYY-MM. Name the Personal account and the month. Do not invent rows. Do not put amounts or totals in your sentence.
+When they described a Task, call propose_task. Title is required. Due may only be today or tomorrow. Write one plain-text sentence that describes this Task, asks the member to check the card and add, and does not claim the Task is already written. Do not say added, saved, or done."""
 
 PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
     "type": "function",
@@ -54,6 +56,33 @@ PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
                 "note",
                 "occurred_on",
             ],
+        },
+    },
+}
+
+PROPOSE_TASK_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_task",
+        "description": "Draft a Task the member can confirm. Do not write the Task.",
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "title": {"type": ["string", "null"]},
+                "assignee_id": {"type": ["string", "null"]},
+                "due": {
+                    "type": ["string", "null"],
+                    "enum": ["today", "tomorrow", None],
+                },
+                "priority": {
+                    "type": ["string", "null"],
+                    "enum": ["low", "medium", "high", None],
+                },
+                "category": {"type": ["string", "null"]},
+                "recurring": {"type": ["boolean", "null"]},
+            },
+            "required": ["title", "assignee_id", "due", "priority", "category", "recurring"],
         },
     },
 }
@@ -103,7 +132,7 @@ def complete_assistant_turn(*, messages: list[dict[str, str]], catalog: str = ""
         response = client.chat.completions.create(
             model=settings.openai_model,
             messages=[{"role": "system", "content": SYSTEM_PROMPT + catalog_block}, *messages],
-            tools=[PROPOSE_EXPENSE_TOOL, LIST_EXPENSES_TOOL],
+            tools=[PROPOSE_EXPENSE_TOOL, LIST_EXPENSES_TOOL, PROPOSE_TASK_TOOL],
             tool_choice="auto",
             reasoning_effort="none",
         )

@@ -141,6 +141,7 @@ def test_off_intent_refuses_and_creates_no_expense(client: TestClient, assistant
     assert personal.status_code == 200
     assert personal.json()["accounts"] == []
     assert personal.json()["current_month_count"] == 0
+    assert _tasks(client, family_id, owner) == []
 
 
 def test_child_member_can_take_a_turn(
@@ -2486,5 +2487,395 @@ def test_personal_list_ignores_tool_rows_and_foreign_account_id(
     assert expense_list["rows"][0]["id"] == tesco["id"]
     assert fake_row_id not in {row["id"] for row in expense_list["rows"]}
     assert all(row["merchant"] != "Hallucinated" for row in expense_list["rows"])
+
+
+DRAFT_TASK = "I’ve drafted a task below. Check it and tap Add task."
+ASK_TASK_TITLE = "What needs doing?"
+ASK_TASK_ASSIGNEE = "Who should I assign this to?"
+ASK_TASK_DUE = "Is this due today or tomorrow?"
+
+
+def _propose_task(
+    *,
+    title: str | None = "Take bins out",
+    assignee_id: str | None = None,
+    due: str | None = "tomorrow",
+    priority: str | None = "high",
+    category: str | None = "Household",
+    recurring: bool = True,
+    assistant_text: str = "I drafted a task.",
+) -> AssistantModelResult:
+    return AssistantModelResult(
+        assistant_text=assistant_text,
+        tool_name="propose_task",
+        tool_args={
+            "title": title,
+            "assignee_id": assignee_id,
+            "due": due,
+            "priority": priority,
+            "category": category,
+            "recurring": recurring,
+        },
+    )
+
+
+def test_named_title_returns_task_proposal_and_creates_no_task(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-title@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    caller_id = _member_id(client, family_id, owner, name="Kayode")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(),
+    )
+    before = _tasks(client, family_id, owner)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    proposal = body["task_proposal"]
+    assert proposal is not None
+    assert proposal["title"] == "Take bins out"
+    assert proposal["assignee_id"] == caller_id
+    assert proposal["due"] == "today"
+    assert proposal["priority"] == "medium"
+    assert proposal["category"] == "Household"
+    assert proposal["recurring"] is False
+    assert proposal["title_explicit"] is True
+    assert proposal["assignee_id_explicit"] is False
+    assert proposal["due_explicit"] is False
+    assert proposal["priority_explicit"] is False
+    assert proposal["category_explicit"] is False
+    assert proposal["recurring_explicit"] is False
+    assert body["proposal"] is None
+    assert body["expense_list"] is None
+    assert body["change_proposal"] is None
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert _tasks(client, family_id, owner) == before
+
+
+def test_empty_title_asks_what_needs_doing_and_returns_no_proposal(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-empty@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(title="   "),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["task_proposal"] is None
+    assert body["proposal"] is None
+    assert body["assistant_text"] == ASK_TASK_TITLE
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_unknown_assignee_name_asks_who_and_returns_no_proposal(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-unknown@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out, assign to Steve"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["task_proposal"] is None
+    assert body["assistant_text"] == ASK_TASK_ASSIGNEE
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_unknown_assignee_id_is_stripped_to_caller(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-strip@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    other = auth_headers(client, "assistant-task-other-family@example.com", name="Stranger")
+    other_family_id = _create_family(client, other)
+    foreign_id = _member_id(client, other_family_id, other, name="Stranger")
+    caller_id = _member_id(client, family_id, owner, name="Kayode")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(assignee_id=foreign_id),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["task_proposal"]
+    assert proposal is not None
+    assert proposal["assignee_id"] == caller_id
+    assert proposal["assignee_id"] != foreign_id
+    assert proposal["assignee_id_explicit"] is False
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_named_family_assignee_is_explicit(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-assignee@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    partner = _invite_partner(client, owner, family_id, "assistant-task-partner@example.com")
+    partner_id = _member_id(client, family_id, partner, name="Partner")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out, assign to Partner"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["task_proposal"]
+    assert proposal is not None
+    assert proposal["assignee_id"] == partner_id
+    assert proposal["assignee_id_explicit"] is True
+    assert _tasks(client, family_id, owner) == []
+
+
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "add a task to take bins out on Friday",
+        "add a task to take bins out next week",
+    ],
+)
+def test_unmappable_due_asks_today_or_tomorrow(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    user_text: str,
+) -> None:
+    owner = auth_headers(
+        client,
+        f"assistant-task-due-{user_text.split()[-1]}@example.com",
+    )
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": user_text}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["task_proposal"] is None
+    assert body["assistant_text"] == ASK_TASK_DUE
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_friday_in_title_still_returns_task_proposal(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-friday-title@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(title="Plan the Friday shop"),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to plan the Friday shop"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["task_proposal"]
+    assert proposal is not None
+    assert proposal["title"] == "Plan the Friday shop"
+    assert proposal["due"] == "today"
+    assert proposal["due_explicit"] is False
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_task_phrase_check_sets_explicit_from_user_text(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-explicit@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    caller_id = _member_id(client, family_id, owner, name="Kayode")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(assignee_id=caller_id),
+    )
+    named = _propose(
+        client,
+        family_id,
+        owner,
+        [{
+            "role": "user",
+            "content": (
+                "add a task to take bins out tomorrow, assign to Kayode, "
+                "high priority, household, weekly"
+            ),
+        }],
+    )
+    assert named.status_code == 200, named.text
+    named_proposal = named.json()["task_proposal"]
+    assert named_proposal is not None
+    assert named_proposal["title"] == "Take bins out"
+    assert named_proposal["assignee_id"] == caller_id
+    assert named_proposal["due"] == "tomorrow"
+    assert named_proposal["priority"] == "high"
+    assert named_proposal["category"] == "Household"
+    assert named_proposal["recurring"] is True
+    assert named_proposal["title_explicit"] is True
+    assert named_proposal["assignee_id_explicit"] is True
+    assert named_proposal["due_explicit"] is True
+    assert named_proposal["priority_explicit"] is True
+    assert named_proposal["category_explicit"] is True
+    assert named_proposal["recurring_explicit"] is True
+
+    inferred = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out"}],
+    )
+    assert inferred.status_code == 200, inferred.text
+    inferred_proposal = inferred.json()["task_proposal"]
+    assert inferred_proposal is not None
+    assert inferred_proposal["assignee_id"] == caller_id
+    assert inferred_proposal["due"] == "today"
+    assert inferred_proposal["priority"] == "medium"
+    assert inferred_proposal["category"] == "Household"
+    assert inferred_proposal["recurring"] is False
+    assert inferred_proposal["title_explicit"] is True
+    assert inferred_proposal["assignee_id_explicit"] is False
+    assert inferred_proposal["due_explicit"] is False
+    assert inferred_proposal["priority_explicit"] is False
+    assert inferred_proposal["category_explicit"] is False
+    assert inferred_proposal["recurring_explicit"] is False
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_empty_model_content_with_task_proposal_uses_template_not_refuse(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-template@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["task_proposal"] is not None
+    assert body["assistant_text"] == DRAFT_TASK
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_task_proposal_never_returns_refuse_string(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-refuse@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(assistant_text=REFUSE_TEXT),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a task to take bins out"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["task_proposal"] is not None
+    assert body["assistant_text"] == DRAFT_TASK
+    assert body["assistant_text"] != REFUSE_TEXT
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_personal_task_category_is_not_personal_unavailable(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-task-personal-cat@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_task(category="Personal"),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "add a personal task to call mom"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    proposal = body["task_proposal"]
+    assert proposal is not None
+    assert proposal["title"] == "Take bins out"
+    assert proposal["category"] == "Personal"
+    assert proposal["category_explicit"] is True
+    assert "personal account" not in body["assistant_text"].casefold()
+    assert _tasks(client, family_id, owner) == []
 
 

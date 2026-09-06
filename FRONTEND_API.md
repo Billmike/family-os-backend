@@ -1345,7 +1345,32 @@ Auth + family membership.
 }
 ```
 
-`proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`.
+`proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`. Confirming a Task proposal uses `POST /api/families/{family_id}/tasks` as the signed-in member (due 17:00 Family timezone; `medium` → `normal`; weekly recurrence or none). No Task provenance field.
+
+When the member described a Task, `task_proposal` is a draft. Title must be non-empty after strip or there is no card. Unknown assignee names ask who; unknown assignee ids are stripped. Defaults when not named: assignee is the caller, due today, priority medium, category Household, recurrence off. Due on the card is only `today` or `tomorrow`. Empty model text with a Task proposal uses `I’ve drafted a task below. Check it and tap Add task.` and is never the refuse fallback.
+
+```json
+{
+  "assistant_text": "I’ve drafted a task below. Check it and tap Add task.",
+  "proposal": null,
+  "task_proposal": {
+    "title": "Take bins out",
+    "assignee_id": "...",
+    "due": "tomorrow",
+    "priority": "high",
+    "category": "Household",
+    "recurring": true,
+    "title_explicit": true,
+    "assignee_id_explicit": true,
+    "due_explicit": true,
+    "priority_explicit": true,
+    "category_explicit": true,
+    "recurring_explicit": true
+  },
+  "expense_list": null,
+  "change_proposal": null
+}
+```
 
 When the member asked for a Household Expense list, `expense_list` is the Family outflows for one budget period (current when unnamed). The server loads the rows; `rows` in tool args are ignored. `count` and `total` match those outflow rows. Empty windows still return the card (`count` 0, `total` `"0.00"`). Assistant text names Household and the period and never includes amounts or totals.
 

@@ -14,10 +14,12 @@ from app.schemas.assistant import (
     AssistantTurnOut,
     ExpenseList,
     ExpenseProposal,
+    TaskProposal,
 )
 from app.services import assistant_list
 from app.services import assistant_model
 from app.services import assistant_proposal
+from app.services import assistant_task
 
 ALLOWED_ROLES = frozenset({"user", "assistant"})
 TURNS_PER_HOUR = 30
@@ -81,16 +83,22 @@ def run_turn(
     destination_named, _ = assistant_proposal.destination_from_text(
         user_text, [row.name for row in catalog_data.accounts]
     )
-    if destination_named == assistant_proposal.DESTINATION_PERSONAL and not catalog_data.accounts:
+    catalog = assistant_proposal.format_catalog(catalog_data)
+    result = assistant_model.complete_assistant_turn(messages=kept, catalog=catalog)
+    if (
+        result.tool_name == "propose_expense"
+        and destination_named == assistant_proposal.DESTINATION_PERSONAL
+        and not catalog_data.accounts
+    ):
         return AssistantTurnOut(
             assistant_text=assistant_proposal.PERSONAL_UNAVAILABLE,
             proposal=None,
         )
-    catalog = assistant_proposal.format_catalog(catalog_data)
-    result = assistant_model.complete_assistant_turn(messages=kept, catalog=catalog)
     proposal = None
     expense_list = None
     list_message = None
+    task_proposal = None
+    task_message = None
     if result.tool_name == "propose_expense" and result.tool_args is not None:
         proposal = assistant_proposal.proposal_from_tool(
             result.tool_args,
@@ -112,15 +120,25 @@ def run_turn(
             )
             expense_list = listed.expense_list
             list_message = listed.message
+    elif result.tool_name == "propose_task" and result.tool_args is not None:
+        drafted = assistant_task.task_from_tool(
+            result.tool_args,
+            user_text=user_text,
+            catalog=catalog_data,
+        )
+        task_proposal = drafted.task_proposal
+        task_message = drafted.message
     return AssistantTurnOut(
         assistant_text=_resolve_assistant_text(
             result.assistant_text,
             proposal,
             expense_list,
             list_message,
+            task_proposal,
+            task_message,
         ),
         proposal=proposal,
-        task_proposal=None,
+        task_proposal=task_proposal,
         expense_list=expense_list,
         change_proposal=None,
     )
@@ -131,12 +149,20 @@ def _resolve_assistant_text(
     proposal: ExpenseProposal | None,
     expense_list: ExpenseList | None = None,
     list_message: str | None = None,
+    task_proposal: TaskProposal | None = None,
+    task_message: str | None = None,
 ) -> str:
     if list_message:
         return list_message
+    if task_message:
+        return task_message
     text = (model_text or "").strip()
     if expense_list is not None:
         return assistant_list.list_text(expense_list)
+    if task_proposal is not None:
+        if text and text != assistant_model.DEFAULT_REFUSE:
+            return text
+        return assistant_model.DRAFT_TASK
     if proposal is None:
         return text or assistant_model.DEFAULT_REFUSE
     if text and text != assistant_model.DEFAULT_REFUSE:
