@@ -63,6 +63,8 @@ class ExpenseListRow(BaseModel):
     category_or_subcategory_label: str | None = None
     source_type: str
     writable: bool
+    subcategory_id: UUID | None = None
+    note: str | None = None
 
 
 class ExpenseList(BaseModel):

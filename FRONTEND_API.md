@@ -1374,7 +1374,7 @@ When the member described a Task, `task_proposal` is a draft. Title must be non-
 
 When the member asked for a Household Expense list, `expense_list` is the Family outflows for one budget period (current when unnamed). The server loads the rows; `rows` in tool args are ignored. `count` and `total` match those outflow rows. Empty windows still return the card (`count` 0, `total` `"0.00"`). Assistant text names Household and the period and never includes amounts or totals.
 
-When the member asked for a Personal Expense list, `expense_list` is every row on one of the caller’s Personal accounts for one calendar month (current month in the Family timezone when unnamed). A named month (`YYYY-MM` or an English month name) selects that month. Destination follows the same rules as add-expense, including `destination_hint` from the open screen (never `destination_explicit`). Unspecified Destination with Personal accounts and no hint asks Household or Personal and returns no list. One Personal account is used without asking; several without a named account asks which. A partner cannot attach another member’s Personal rows. Assistant text names the Personal account and month and never includes amounts or totals. Empty windows still return the card.
+When the member asked for a Personal Expense list, `expense_list` is every row on one of the caller’s Personal accounts for one calendar month (current month in the Family timezone when unnamed). A named month (`YYYY-MM` or an English month name) selects that month. Destination follows the same rules as add-expense, including `destination_hint` from the open screen (never `destination_explicit`). Unspecified Destination with Personal accounts and no hint asks Household or Personal and returns no list. One Personal account is used without asking; several without a named account asks which. A partner cannot attach another member’s Personal rows. Assistant text names the Personal account and month and never includes amounts or totals. Empty windows still return the card. Each row includes `subcategory_id` (Family) and `note` so a writable row can open an Expense change proposal without a new turn. `writable` is true only for `manual` and `assistant`.
 
 ```json
 {
@@ -1399,7 +1399,9 @@ When the member asked for a Personal Expense list, `expense_list` is every row o
         "amount": "12.00",
         "category_or_subcategory_label": "Transport",
         "source_type": "assistant",
-        "writable": true
+        "writable": true,
+        "subcategory_id": "...",
+        "note": "Weekly shop"
       }
     ]
   },

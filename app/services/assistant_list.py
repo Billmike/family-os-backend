@@ -253,6 +253,8 @@ def _to_list_row(row: ExpenseOut, *, family_timezone: str) -> ExpenseListRow:
         category_or_subcategory_label=row.subcategory_name,
         source_type=row.source_type,
         writable=row.source_type in WRITABLE_SOURCES,
+        subcategory_id=row.subcategory_id,
+        note=row.note,
     )
 
 
@@ -266,6 +268,8 @@ def _personal_to_list_row(row: PersonalExpense, *, family_timezone: str) -> Expe
         category_or_subcategory_label=row.category,
         source_type=row.source_type,
         writable=row.source_type in WRITABLE_SOURCES,
+        subcategory_id=None,
+        note=row.note,
     )
 
 

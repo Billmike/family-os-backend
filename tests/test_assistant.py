@@ -1039,6 +1039,7 @@ def _add_family_expense(
     merchant: str | None,
     occurred_at: str | None = None,
     source_type: str = "manual",
+    note: str | None = None,
 ) -> dict:
     body: dict = {
         "amount": amount,
@@ -1048,6 +1049,8 @@ def _add_family_expense(
     }
     if occurred_at is not None:
         body["occurred_at"] = occurred_at
+    if note is not None:
+        body["note"] = note
     created = client.post(f"/api/families/{family_id}/expenses", headers=headers, json=body)
     assert created.status_code == 200, created.text
     return created.json()
@@ -1195,6 +1198,7 @@ def test_household_list_is_outflows_newest_first_and_omits_income(
         merchant="Tesco",
         occurred_at="2026-09-06T10:00:00Z",
         source_type="assistant",
+        note="Weekly shop",
     )
     _add_family_expense(
         client,
@@ -1232,8 +1236,12 @@ def test_household_list_is_outflows_newest_first_and_omits_income(
     assert expense_list["rows"][0]["occurred_on"] == "2026-09-06"
     assert expense_list["rows"][0]["source_type"] == "assistant"
     assert expense_list["rows"][0]["writable"] is True
+    assert expense_list["rows"][0]["subcategory_id"] == transport_id
+    assert expense_list["rows"][0]["note"] == "Weekly shop"
     assert expense_list["rows"][1]["merchant"] == "Miles"
     assert expense_list["rows"][1]["writable"] is True
+    assert expense_list["rows"][1]["subcategory_id"] == transport_id
+    assert expense_list["rows"][1]["note"] is None
     assert all(row["merchant"] != "Payroll" for row in expense_list["rows"])
     assert body["assistant_text"] == HOUSEHOLD_LIST_SEPTEMBER
     assert "20.00" not in body["assistant_text"]
@@ -1622,6 +1630,7 @@ def _add_personal_expense(
     category: str = "Dining",
     occurred_at: str | None = None,
     source_type: str = "manual",
+    note: str | None = None,
 ) -> dict:
     body: dict = {
         "amount": amount,
@@ -1631,6 +1640,8 @@ def _add_personal_expense(
     }
     if occurred_at is not None:
         body["occurred_at"] = occurred_at
+    if note is not None:
+        body["note"] = note
     created = client.post(
         f"/api/me/expense-accounts/{account_id}/expenses",
         headers=headers,
@@ -1947,6 +1958,7 @@ def test_personal_list_is_every_row_in_account_and_month_newest_first(
         category="Dining",
         occurred_at=f"{month}-06T10:00:00Z",
         source_type="assistant",
+        note="Lunch",
     )
     _add_personal_expense(
         client,
@@ -1990,8 +2002,11 @@ def test_personal_list_is_every_row_in_account_and_month_newest_first(
     assert expense_list["rows"][0]["occurred_on"] == f"{month}-06"
     assert expense_list["rows"][0]["source_type"] == "assistant"
     assert expense_list["rows"][0]["writable"] is True
+    assert expense_list["rows"][0]["subcategory_id"] is None
+    assert expense_list["rows"][0]["note"] == "Lunch"
     assert expense_list["rows"][1]["merchant"] == "Miles"
     assert expense_list["rows"][1]["category_or_subcategory_label"] == "Transport"
+    assert expense_list["rows"][1]["note"] is None
     assert all(row["merchant"] != "Rent" for row in expense_list["rows"])
     assert all(row["merchant"] != "Old shop" for row in expense_list["rows"])
     assert res.json()["assistant_text"] == f"Here are your Fun expenses for {month}."
