@@ -273,3 +273,78 @@ def test_accounts_survive_leaving_family(client: TestClient) -> None:
     names = [row["name"] for row in listed.json()["accounts"]]
     assert names == ["Partner wallet"]
     assert listed.json()["current_month_count"] == 1
+
+
+def test_personal_expense_defaults_to_manual_and_can_be_assistant(client: TestClient) -> None:
+    headers = auth_headers(client, "pex-source@example.com", name="Owner")
+    _create_family(client, headers)
+    account_id = client.post(
+        "/api/me/expense-accounts",
+        headers=headers,
+        json={"name": "Fun"},
+    ).json()["id"]
+
+    manual = client.post(
+        f"/api/me/expense-accounts/{account_id}/expenses",
+        headers=headers,
+        json={"amount": "4.00", "category": "Dining"},
+    )
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["source_type"] == "manual"
+
+    assistant = client.post(
+        f"/api/me/expense-accounts/{account_id}/expenses",
+        headers=headers,
+        json={"amount": "6.00", "category": "Dining", "source_type": "assistant"},
+    )
+    assert assistant.status_code == 200, assistant.text
+    assert assistant.json()["source_type"] == "assistant"
+
+    patched = client.patch(
+        f"/api/personal-expenses/{assistant.json()['id']}",
+        headers=headers,
+        json={"amount": "7.00"},
+    )
+    assert patched.status_code == 200
+    assert float(patched.json()["amount"]) == 7.00
+    assert patched.json()["source_type"] == "assistant"
+
+    deleted = client.delete(
+        f"/api/personal-expenses/{assistant.json()['id']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+
+
+def test_partner_cannot_read_another_members_personal_assistant_row(client: TestClient) -> None:
+    owner = auth_headers(client, "pex-assist-owner@example.com", name="Owner")
+    family_id = _create_family(client, owner, "Shared Family")
+    partner = _invite_partner(client, owner, family_id, "pex-assist-partner@example.com")
+    account_id = client.post(
+        "/api/me/expense-accounts",
+        headers=owner,
+        json={"name": "Owner cash"},
+    ).json()["id"]
+    expense = client.post(
+        f"/api/me/expense-accounts/{account_id}/expenses",
+        headers=owner,
+        json={"amount": "9.00", "category": "Other", "source_type": "assistant"},
+    ).json()
+
+    month = client.get("/api/me/expense-accounts", headers=owner).json()["current_month"]
+    assert client.get(
+        f"/api/me/expense-accounts/{account_id}/expenses?month={month}",
+        headers=partner,
+    ).status_code == 404
+    assert client.patch(
+        f"/api/personal-expenses/{expense['id']}",
+        headers=partner,
+        json={"amount": "1.00"},
+    ).status_code == 404
+    assert client.delete(
+        f"/api/personal-expenses/{expense['id']}",
+        headers=partner,
+    ).status_code == 404
+    partner_list = client.get("/api/me/expense-accounts", headers=partner)
+    assert partner_list.json()["accounts"] == []
+    assert partner_list.json()["current_month_count"] == 0

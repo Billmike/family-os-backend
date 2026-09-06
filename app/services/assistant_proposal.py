@@ -17,6 +17,7 @@ HOUSEHOLD_PHRASES = ("household", "family", "for the house", "shared")
 PERSONAL_PHRASES = ("personal", "my money", "my account", "private")
 DESTINATION_HOUSEHOLD = "household"
 DESTINATION_PERSONAL = "personal"
+PERSONAL_UNAVAILABLE = "You don't have a Personal account, so I can't draft a Personal expense."
 
 
 def load_catalog(db: Session, *, family_id: UUID, user_id: UUID) -> tuple[list[BudgetSubcategory], list[PersonalExpenseAccount]]:
@@ -111,9 +112,11 @@ def _parse_text(value: object) -> str | None:
 
 def destination_from_text(text: str, account_names: list[str]) -> tuple[str | None, bool]:
     named_account = any(_contains_token(text, name) for name in account_names)
+    if named_account:
+        return DESTINATION_PERSONAL, True
     if _contains_phrase(text, HOUSEHOLD_PHRASES):
         return DESTINATION_HOUSEHOLD, True
-    if _contains_phrase(text, PERSONAL_PHRASES) or named_account:
+    if _contains_phrase(text, PERSONAL_PHRASES):
         return DESTINATION_PERSONAL, True
     return None, False
 
@@ -148,6 +151,16 @@ def proposal_from_tool(
 
     account_id = _parse_uuid(args.get("account_id"))
     if account_id not in account_ids:
+        account_id = None
+    named_account = next((row for row in accounts if _contains_token(user_text, row.name)), None)
+    if destination == DESTINATION_PERSONAL:
+        if named_account:
+            account_id = named_account.id
+        elif len(accounts) == 1:
+            account_id = accounts[0].id
+        else:
+            account_id = None
+    elif destination == DESTINATION_HOUSEHOLD:
         account_id = None
     account_name = account_ids[account_id].name if account_id else None
 

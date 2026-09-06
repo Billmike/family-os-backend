@@ -1246,7 +1246,7 @@ Deletes the account and all of its expenses.
 
 ### `POST /api/me/expense-accounts/{account_id}/expenses`
 
-Create a manual personal expense.
+Create a personal expense. Rows default to `source_type: "manual"`. Assistant-confirmed entries use `source_type: "assistant"` and stay editable like manual rows. Other members cannot read these rows.
 
 **Request**
 
@@ -1256,7 +1256,8 @@ Create a manual personal expense.
   "category": "Dining",
   "merchant": "Café",
   "note": "Lunch",
-  "occurred_at": "2026-08-29T12:00:00Z"
+  "occurred_at": "2026-08-29T12:00:00Z",
+  "source_type": "manual"
 }
 ```
 
@@ -1268,6 +1269,7 @@ Create a manual personal expense.
 | `note` | Optional, max 500 |
 | `occurred_at` | Optional ISO datetime; defaults to now |
 | `currency` | Optional, 3-letter code; defaults to the account currency |
+| `source_type` | Optional, `manual` (default) or `assistant` |
 
 **Response `200`** — `PersonalExpenseOut`.
 
@@ -1337,7 +1339,7 @@ Auth + family membership.
 }
 ```
 
-`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense. Proposed ids that are not in this Family’s Subcategory catalog (or the caller’s Personal accounts) are stripped. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`.
+`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense. Proposed ids that are not in this Family’s Subcategory catalog (or the caller’s Personal accounts) are stripped. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`.
 
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 

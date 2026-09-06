@@ -69,13 +69,22 @@ def run_turn(
     subcategories, accounts = assistant_proposal.load_catalog(
         db, family_id=family_id, user_id=user.id
     )
+    user_text = assistant_proposal.latest_user_text(kept)
+    destination_named, _ = assistant_proposal.destination_from_text(
+        user_text, [row.name for row in accounts]
+    )
+    if destination_named == assistant_proposal.DESTINATION_PERSONAL and not accounts:
+        return AssistantTurnOut(
+            assistant_text=assistant_proposal.PERSONAL_UNAVAILABLE,
+            proposal=None,
+        )
     catalog = assistant_proposal.format_catalog(subcategories, accounts)
     result = assistant_model.complete_assistant_turn(messages=kept, catalog=catalog)
     proposal = None
     if result.tool_name == "propose_expense" and result.tool_args is not None:
         proposal = assistant_proposal.proposal_from_tool(
             result.tool_args,
-            user_text=assistant_proposal.latest_user_text(kept),
+            user_text=user_text,
             subcategories=subcategories,
             accounts=accounts,
         )

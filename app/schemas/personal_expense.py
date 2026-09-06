@@ -5,11 +5,13 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.personal_expense import (
+    CREATE_SOURCE_TYPES,
     DEFAULT_PERSONAL_CATEGORY,
     MAX_ACCOUNT_NAME,
     MAX_MERCHANT,
     MAX_NOTE,
     PERSONAL_EXPENSE_CATEGORIES,
+    SOURCE_MANUAL,
 )
 from app.schemas.auth import ORMModel
 
@@ -96,6 +98,7 @@ class PersonalExpenseCreate(BaseModel):
     note: str | None = Field(default=None, max_length=MAX_NOTE)
     occurred_at: datetime | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
+    source_type: str = SOURCE_MANUAL
 
     @field_validator("merchant", "note", mode="before")
     @classmethod
@@ -116,6 +119,13 @@ class PersonalExpenseCreate(BaseModel):
         if value is None:
             return None
         return value.strip().upper()
+
+    @field_validator("source_type")
+    @classmethod
+    def source_type_allowed(cls, value: str) -> str:
+        if value not in CREATE_SOURCE_TYPES:
+            raise ValueError("source_type must be manual or assistant")
+        return value
 
 
 class PersonalExpenseUpdate(BaseModel):
@@ -150,5 +160,6 @@ class PersonalExpenseOut(ORMModel):
     merchant: str | None
     note: str | None
     occurred_at: datetime
+    source_type: str
     created_at: datetime
     updated_at: datetime

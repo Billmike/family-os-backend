@@ -8,6 +8,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 from app.models.user import TimestampMixin
 
+SOURCE_MANUAL = "manual"
+SOURCE_ASSISTANT = "assistant"
+CREATE_SOURCE_TYPES = frozenset({SOURCE_MANUAL, SOURCE_ASSISTANT})
+
 PERSONAL_EXPENSE_CATEGORIES = (
     "Dining",
     "Transport",
@@ -63,6 +67,7 @@ class PersonalExpense(Base, TimestampMixin):
     merchant: Mapped[str | None] = mapped_column(String, nullable=True)
     note: Mapped[str | None] = mapped_column(String, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String, nullable=False, default=SOURCE_MANUAL)
 
     account: Mapped[PersonalExpenseAccount] = relationship(
         "PersonalExpenseAccount", back_populates="expenses"

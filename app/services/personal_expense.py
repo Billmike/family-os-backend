@@ -92,6 +92,7 @@ def expense_to_out(expense: PersonalExpense) -> PersonalExpenseOut:
         merchant=expense.merchant,
         note=expense.note,
         occurred_at=expense.occurred_at,
+        source_type=expense.source_type,
         created_at=expense.created_at,
         updated_at=expense.updated_at,
     )
@@ -241,6 +242,7 @@ def create_expense(
         merchant=data.merchant,
         note=data.note,
         occurred_at=occurred_at,
+        source_type=data.source_type,
     )
     db.add(expense)
     db.commit()

@@ -365,3 +365,333 @@ def test_cross_family_subcategory_id_is_stripped(
     assert proposal["subcategory_id_explicit"] is False
     spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
     assert spend.json()["year_to_date_total"] == "0.00"
+
+
+def test_personal_phrase_with_no_personal_account_is_refused(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-no-personal@example.com")
+    family_id = _create_family(client, owner)
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, destination="personal"),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "personal coffee €4"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is None
+    assert "personal account" in body["assistant_text"].casefold()
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+    personal = client.get("/api/me/expense-accounts", headers=owner)
+    assert personal.json()["accounts"] == []
+    assert personal.json()["current_month_count"] == 0
+
+
+def _create_personal_account(client: TestClient, headers: dict, name: str) -> str:
+    created = client.post("/api/me/expense-accounts", headers=headers, json={"name": name})
+    assert created.status_code == 200, created.text
+    return created.json()["id"]
+
+
+def test_destination_explicit_follows_user_text_not_model(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-phrase@example.com")
+    family_id = _create_family(client, owner)
+    _create_personal_account(client, owner, "Fun")
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, destination="household"),
+    )
+
+    unspecified = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "coffee €12 at Tesco"}],
+    )
+    assert unspecified.status_code == 200, unspecified.text
+    unspecified_proposal = unspecified.json()["proposal"]
+    assert unspecified_proposal is not None
+    assert unspecified_proposal["destination"] == "household"
+    assert unspecified_proposal["destination_explicit"] is False
+
+    named = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "household coffee €12 at Tesco"}],
+    )
+    assert named.status_code == 200, named.text
+    named_proposal = named.json()["proposal"]
+    assert named_proposal is not None
+    assert named_proposal["destination"] == "household"
+    assert named_proposal["destination_explicit"] is True
+
+    personal = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "personal coffee €12 at Tesco"}],
+    )
+    assert personal.status_code == 200, personal.text
+    personal_proposal = personal.json()["proposal"]
+    assert personal_proposal is not None
+    assert personal_proposal["destination"] == "personal"
+    assert personal_proposal["destination_explicit"] is True
+
+
+def _invite_partner(client: TestClient, owner: dict, family_id: str, email: str) -> dict:
+    invite = client.post(
+        f"/api/families/{family_id}/invitations",
+        headers=owner,
+        json={"email": email},
+    )
+    assert invite.status_code == 200, invite.text
+    partner = auth_headers(client, email, name="Partner")
+    accepted = client.post(
+        f"/api/invitations/{invite.json()['invite_token']}/accept",
+        headers=partner,
+    )
+    assert accepted.status_code == 200, accepted.text
+    return partner
+
+
+def test_cross_user_personal_account_id_is_stripped(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-owner-acct@example.com")
+    family_id = _create_family(client, owner)
+    partner = _invite_partner(client, owner, family_id, "assistant-partner-acct@example.com")
+    owner_account_id = _create_personal_account(client, owner, "Owner cash")
+    partner_account_id = _create_personal_account(client, partner, "Partner cash")
+    transport_id = _transport_id(client, family_id, owner)
+
+    def _propose_partner_account(**_kwargs) -> AssistantModelResult:
+        return AssistantModelResult(
+            assistant_text="I drafted a Personal expense.",
+            tool_name="propose_expense",
+            tool_args={
+                "destination": "personal",
+                "account_id": partner_account_id,
+                "amount": 4,
+                "subcategory_id": transport_id,
+                "category": "Dining",
+                "merchant": None,
+                "note": None,
+                "occurred_on": None,
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        _propose_partner_account,
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "coffee €4"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["account_id"] != partner_account_id
+    assert proposal["account_id"] in (None, owner_account_id)
+    assert proposal["account_id_explicit"] is False
+
+
+def test_one_personal_account_and_personal_phrase_selects_that_account(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-one-acct@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, destination="household"),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "personal coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "personal"
+    assert proposal["destination_explicit"] is True
+    assert proposal["account_id"] == account_id
+    assert proposal["account_id_explicit"] is False
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+    listed = client.get("/api/me/expense-accounts", headers=owner)
+    assert listed.json()["current_month_count"] == 0
+
+
+def test_named_personal_account_is_preselected_and_explicit(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-named-acct@example.com")
+    family_id = _create_family(client, owner)
+    fun_id = _create_personal_account(client, owner, "Fun")
+    other_id = _create_personal_account(client, owner, "Bills")
+    transport_id = _transport_id(client, family_id, owner)
+
+    def _propose_other_account(**_kwargs) -> AssistantModelResult:
+        return AssistantModelResult(
+            assistant_text="I drafted a Personal expense.",
+            tool_name="propose_expense",
+            tool_args={
+                "destination": "household",
+                "account_id": other_id,
+                "amount": 12,
+                "subcategory_id": transport_id,
+                "category": "Dining",
+                "merchant": None,
+                "note": None,
+                "occurred_on": None,
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        _propose_other_account,
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "put it on Fun, coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "personal"
+    assert proposal["destination_explicit"] is True
+    assert proposal["account_id"] == fun_id
+    assert proposal["account_id_explicit"] is True
+
+
+def test_several_personal_accounts_and_personal_phrase_leave_account_unselected(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-many-acct@example.com")
+    family_id = _create_family(client, owner)
+    _create_personal_account(client, owner, "Fun")
+    _create_personal_account(client, owner, "Bills")
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, destination="household"),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "personal coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "personal"
+    assert proposal["destination_explicit"] is True
+    assert proposal["account_id"] is None
+    assert proposal["account_id_explicit"] is False
+
+
+def test_several_personal_accounts_ignore_model_account_id(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-ignore-model-acct@example.com")
+    family_id = _create_family(client, owner)
+    fun_id = _create_personal_account(client, owner, "Fun")
+    _create_personal_account(client, owner, "Bills")
+    transport_id = _transport_id(client, family_id, owner)
+
+    def _propose_fun(**_kwargs) -> AssistantModelResult:
+        return AssistantModelResult(
+            assistant_text="I drafted a Personal expense.",
+            tool_name="propose_expense",
+            tool_args={
+                "destination": "personal",
+                "account_id": fun_id,
+                "amount": 12,
+                "subcategory_id": transport_id,
+                "category": "Dining",
+                "merchant": None,
+                "note": None,
+                "occurred_on": None,
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        _propose_fun,
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "personal coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "personal"
+    assert proposal["destination_explicit"] is True
+    assert proposal["account_id"] is None
+    assert proposal["account_id_explicit"] is False
+
+
+def test_named_account_wins_over_household_phrase(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-shared-acct@example.com")
+    family_id = _create_family(client, owner)
+    shared_id = _create_personal_account(client, owner, "Shared")
+    _create_personal_account(client, owner, "Fun")
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id, destination="household"),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "put it on Shared, coffee €12"}],
+    )
+    assert res.status_code == 200, res.text
+    proposal = res.json()["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "personal"
+    assert proposal["destination_explicit"] is True
+    assert proposal["account_id"] == shared_id
+    assert proposal["account_id_explicit"] is True
