@@ -164,7 +164,6 @@ def extract_receipt(
                 "schema": EXTRACTION_SCHEMA,
             },
         },
-        temperature=0,
     )
 
     content = response.choices[0].message.content

@@ -80,7 +80,6 @@ def complete_assistant_turn(*, messages: list[dict[str, str]], catalog: str = ""
             messages=[{"role": "system", "content": SYSTEM_PROMPT + catalog_block}, *messages],
             tools=[PROPOSE_EXPENSE_TOOL],
             tool_choice="auto",
-            temperature=0,
         )
     except Exception as exc:
         raise service_unavailable(

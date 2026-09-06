@@ -78,7 +78,7 @@ Set these in `.env` (see `.env.example`):
 | Variable | Purpose |
 |----------|---------|
 | `OPENAI_API_KEY` | Required for extraction. Empty → upload returns 503. |
-| `OPENAI_MODEL` | Default `gpt-4o-mini` |
+| `OPENAI_MODEL` | Default `gpt-5.6-luna` |
 | `RECEIPT_SCANNING_ENABLED` | Default `true` |
 | `RECEIPT_STORAGE_DIR` | Local directory for images (Docker volume `/app/var/receipts`) |
 | `RECEIPT_MAX_BYTES` | Default `10485760` (10 MB) |

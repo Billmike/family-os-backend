@@ -1441,7 +1441,7 @@ Discard a draft (not yet confirmed). Deletes the stored image.
   "tax_total": "4.77",
   "total": "52.10",
   "totals_mismatch": false,
-  "model_name": "gpt-4o-mini",
+  "model_name": "gpt-5.6-luna",
   "error_message": null,
   "expense_id": null,
   "shopping_session_id": null,
