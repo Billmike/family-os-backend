@@ -26,4 +26,5 @@ def propose_turn(
         family_id=family_id,
         user=user,
         messages=data.messages,
+        destination_hint=data.destination_hint,
     )

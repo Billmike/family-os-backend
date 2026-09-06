@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import service_unavailable, too_many_requests
 from app.models.user import User
-from app.schemas.assistant import AssistantMessageIn, AssistantTurnOut, ExpenseProposal
+from app.schemas.assistant import AssistantDestination, AssistantMessageIn, AssistantTurnOut, ExpenseProposal
 from app.services import assistant_model
 from app.services import assistant_proposal
 
@@ -53,7 +53,9 @@ def run_turn(
     family_id: UUID,
     user: User,
     messages: list[AssistantMessageIn],
+    destination_hint: AssistantDestination | None = None,
 ) -> AssistantTurnOut:
+    # destination_hint is for list and change; add-expense ignores it.
     require_assistant_available()
     _record_turn(user.id, datetime.now(timezone.utc))
     kept = [
@@ -66,31 +68,32 @@ def run_turn(
             assistant_text=assistant_model.DEFAULT_REFUSE,
             proposal=None,
         )
-    subcategories, accounts = assistant_proposal.load_catalog(
-        db, family_id=family_id, user_id=user.id
-    )
+    catalog_data = assistant_proposal.load_catalog(db, family_id=family_id, user_id=user.id)
     user_text = assistant_proposal.latest_user_text(kept)
     destination_named, _ = assistant_proposal.destination_from_text(
-        user_text, [row.name for row in accounts]
+        user_text, [row.name for row in catalog_data.accounts]
     )
-    if destination_named == assistant_proposal.DESTINATION_PERSONAL and not accounts:
+    if destination_named == assistant_proposal.DESTINATION_PERSONAL and not catalog_data.accounts:
         return AssistantTurnOut(
             assistant_text=assistant_proposal.PERSONAL_UNAVAILABLE,
             proposal=None,
         )
-    catalog = assistant_proposal.format_catalog(subcategories, accounts)
+    catalog = assistant_proposal.format_catalog(catalog_data)
     result = assistant_model.complete_assistant_turn(messages=kept, catalog=catalog)
     proposal = None
     if result.tool_name == "propose_expense" and result.tool_args is not None:
         proposal = assistant_proposal.proposal_from_tool(
             result.tool_args,
             user_text=user_text,
-            subcategories=subcategories,
-            accounts=accounts,
+            subcategories=catalog_data.subcategories,
+            accounts=catalog_data.accounts,
         )
     return AssistantTurnOut(
         assistant_text=_resolve_assistant_text(result.assistant_text, proposal),
         proposal=proposal,
+        task_proposal=None,
+        expense_list=None,
+        change_proposal=None,
     )
 
 

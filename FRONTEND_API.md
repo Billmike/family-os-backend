@@ -1293,7 +1293,7 @@ Create a personal expense. Rows default to `source_type: "manual"`. Assistant-co
 
 ## Assistant
 
-A private, ephemeral turn. The client holds the thread and resends it each time. The Assistant proposes only; it never writes a spend row. Closing the panel discards the thread — nothing is stored as a server conversation.
+A private, ephemeral turn. The client holds the thread and resends it each time. The Assistant proposes only; it never writes a spend row, Task, or expense change. Closing the panel discards the thread — nothing is stored as a server conversation.
 
 Requires `OPENAI_API_KEY`. When missing or `ASSISTANT_ENABLED=false`, the turn route returns `503` with `code: assistant_unavailable`, and `GET /api/auth/me` has `assistant_enabled: false`.
 
@@ -1308,10 +1308,13 @@ Auth + family membership.
 ```json
 {
   "messages": [
-    { "role": "user", "content": "what is left in groceries?" }
-  ]
+    { "role": "user", "content": "I spent €12 at Tesco" }
+  ],
+  "destination_hint": "household"
 }
 ```
+
+`destination_hint` is optional (`"household"` | `"personal"`). It does not change add-expense Destination or `destination_explicit`. Omit it when the open screen has no spend context.
 
 **Response `200`**
 
@@ -1335,11 +1338,14 @@ Auth + family membership.
     "merchant_explicit": true,
     "note_explicit": false,
     "occurred_on_explicit": false
-  }
+  },
+  "task_proposal": null,
+  "expense_list": null,
+  "change_proposal": null
 }
 ```
 
-`proposal` is an Expense proposal or `null`. A completed turn never creates a Family or Personal expense. Proposed ids that are not in this Family’s Subcategory catalog (or the caller’s Personal accounts) are stripped. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`.
+`proposal` is an Expense proposal or `null`. `task_proposal`, `expense_list`, and `change_proposal` are structured siblings; at most one of the four is non-null. A completed turn never creates a Family expense, Personal expense, or Task. Proposed ids that are not in this Family’s catalog (Subcategories, the caller’s Personal accounts, this Family’s members, this Family’s budget periods) are stripped. Other-family member and period ids are not included in the catalog. `*_explicit` is decided by a phrase check on the latest user message, not by the model. Confirming a Family proposal uses `POST /api/families/{family_id}/expenses` with `source_type=assistant`. Confirming a Personal proposal uses `POST /api/me/expense-accounts/{account_id}/expenses` with `source_type=assistant`.
 
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 

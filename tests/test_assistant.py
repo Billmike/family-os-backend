@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from uuid import UUID
 
 import pytest
@@ -51,12 +52,28 @@ def _create_family(client: TestClient, headers: dict) -> str:
     return res.json()["id"]
 
 
-def _propose(client: TestClient, family_id: str, headers: dict | None, messages: list[dict]) -> object:
+def _propose(
+    client: TestClient,
+    family_id: str,
+    headers: dict | None,
+    messages: list[dict],
+    *,
+    destination_hint: str | None = None,
+) -> object:
+    body: dict = {"messages": messages}
+    if destination_hint is not None:
+        body["destination_hint"] = destination_hint
     return client.post(
         TURN_PATH.format(family_id=family_id),
         headers=headers or {},
-        json={"messages": messages},
+        json=body,
     )
+
+
+def _assert_extra_results_unused(body: dict) -> None:
+    assert body["task_proposal"] is None
+    assert body["expense_list"] is None
+    assert body["change_proposal"] is None
 
 
 def test_unauthenticated_turn_is_rejected(client: TestClient) -> None:
@@ -112,6 +129,7 @@ def test_off_intent_refuses_and_creates_no_expense(client: TestClient, assistant
     body = res.json()
     assert body["assistant_text"] == REFUSE_TEXT
     assert body["proposal"] is None
+    _assert_extra_results_unused(body)
 
     spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
     assert spend.status_code == 200
@@ -337,6 +355,7 @@ def test_spend_description_returns_family_proposal_and_creates_no_expense(
     assert proposal["subcategory_id_explicit"] is False
     assert proposal["occurred_on_explicit"] is False
     assert proposal["destination_explicit"] is False
+    _assert_extra_results_unused(body)
 
     spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
     assert spend.json()["year_to_date_total"] == "0.00"
@@ -816,6 +835,111 @@ def test_named_account_wins_over_household_phrase(
     assert proposal["destination_explicit"] is True
     assert proposal["account_id"] == shared_id
     assert proposal["account_id_explicit"] is True
+
+
+def test_destination_hint_does_not_change_add_expense(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-hint@example.com")
+    family_id = _create_family(client, owner)
+    _create_personal_account(client, owner, "Fun")
+    transport_id = _transport_id(client, family_id, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _propose_family_expense(transport_id),
+    )
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "I spent €12 at Tesco"}],
+        destination_hint="personal",
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    proposal = body["proposal"]
+    assert proposal is not None
+    assert proposal["destination"] == "household"
+    assert proposal["destination_explicit"] is False
+    _assert_extra_results_unused(body)
+    spend = client.get(f"/api/families/{family_id}/spend", headers=owner)
+    assert spend.json()["year_to_date_total"] == "0.00"
+    listed = client.get("/api/me/expense-accounts", headers=owner)
+    assert listed.json()["current_month_count"] == 0
+
+
+def _create_current_period(client: TestClient, family_id: str, headers: dict, label_month: str) -> str:
+    today = date.today()
+    created = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": today.replace(day=1).isoformat(),
+            "end_date": today.isoformat(),
+            "label_month": label_month,
+            "budgets": [],
+        },
+    )
+    assert created.status_code == 201, created.text
+    return created.json()["id"]
+
+
+def _member_id(client: TestClient, family_id: str, headers: dict, *, name: str) -> str:
+    members = client.get(f"/api/families/{family_id}/members", headers=headers)
+    assert members.status_code == 200, members.text
+    return next(row["id"] for row in members.json() if row["name"] == name)
+
+
+def test_catalog_omits_other_family_member_and_period_ids(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalogs: list[str] = []
+
+    def _capture(*, catalog: str = "", **_kwargs) -> AssistantModelResult:
+        catalogs.append(catalog)
+        return _fake_refuse()
+
+    monkeypatch.setattr("app.services.assistant_model.complete_assistant_turn", _capture)
+    owner = auth_headers(client, "assistant-catalog-owner@example.com", name="Kayode")
+    family_id = _create_family(client, owner)
+    partner = _invite_partner(client, owner, family_id, "assistant-catalog-partner@example.com")
+    own_period_id = _create_current_period(client, family_id, owner, "2026-09")
+    other = auth_headers(client, "assistant-catalog-other@example.com", name="Stranger")
+    other_family_id = _create_family(client, other)
+    foreign_period_id = _create_current_period(client, other_family_id, other, "2026-08")
+    caller_id = _member_id(client, family_id, owner, name="Kayode")
+    partner_id = _member_id(client, family_id, partner, name="Partner")
+    foreign_member_id = _member_id(client, other_family_id, other, name="Stranger")
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "what is left in groceries?"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is None
+    _assert_extra_results_unused(body)
+    assert len(catalogs) == 1
+    catalog = catalogs[0]
+    assert caller_id in catalog
+    assert partner_id in catalog
+    assert own_period_id in catalog
+    assert "2026-09" in catalog
+    caller_line = next(line for line in catalog.splitlines() if caller_id in line)
+    partner_line = next(line for line in catalog.splitlines() if partner_id in line)
+    period_line = next(line for line in catalog.splitlines() if own_period_id in line)
+    assert "caller" in caller_line
+    assert "caller" not in partner_line
+    assert "current" in period_line
+    assert foreign_member_id not in catalog
+    assert foreign_period_id not in catalog
+    assert "2026-08" not in catalog
 
 
 @pytest.mark.parametrize(

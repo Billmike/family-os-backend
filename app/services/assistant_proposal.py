@@ -3,15 +3,20 @@ from __future__ import annotations
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import NamedTuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.core.money import as_money
+from app.models.budget import BudgetPeriod
 from app.models.budget_subcategory import BudgetSubcategory
+from app.models.family import Family, FamilyMember
 from app.models.personal_expense import PersonalExpenseAccount
 from app.schemas.assistant import ExpenseProposal
 from app.services import budget_subcategory as subcategory_service
+from app.services import family as family_service
+from app.services.budget import current_period
 
 HOUSEHOLD_PHRASES = ("household", "family", "for the house", "shared")
 PERSONAL_PHRASES = ("personal", "my money", "my account", "private")
@@ -20,7 +25,16 @@ DESTINATION_PERSONAL = "personal"
 PERSONAL_UNAVAILABLE = "You don't have a Personal account, so I can't draft a Personal expense."
 
 
-def load_catalog(db: Session, *, family_id: UUID, user_id: UUID) -> tuple[list[BudgetSubcategory], list[PersonalExpenseAccount]]:
+class AssistantCatalog(NamedTuple):
+    subcategories: list[BudgetSubcategory]
+    accounts: list[PersonalExpenseAccount]
+    members: list[FamilyMember]
+    periods: list[BudgetPeriod]
+    caller_member_id: UUID | None
+    current_period_id: UUID | None
+
+
+def load_catalog(db: Session, *, family_id: UUID, user_id: UUID) -> AssistantCatalog:
     subcategories = subcategory_service.ensure_family_subcategories(db, family_id)
     accounts = (
         db.query(PersonalExpenseAccount)
@@ -28,18 +42,51 @@ def load_catalog(db: Session, *, family_id: UUID, user_id: UUID) -> tuple[list[B
         .order_by(PersonalExpenseAccount.sort_order.asc(), PersonalExpenseAccount.created_at.asc())
         .all()
     )
-    return subcategories, accounts
+    members = family_service.list_members(db, family_id)
+    caller = next((row for row in members if row.user_id == user_id), None)
+    family = db.get(Family, family_id)
+    periods = (
+        db.query(BudgetPeriod)
+        .filter(BudgetPeriod.family_id == family_id)
+        .order_by(BudgetPeriod.start_date.desc())
+        .all()
+    )
+    current = current_period(db, family) if family is not None else None
+    return AssistantCatalog(
+        subcategories=subcategories,
+        accounts=accounts,
+        members=members,
+        periods=periods,
+        caller_member_id=caller.id if caller is not None else None,
+        current_period_id=current.id if current is not None else None,
+    )
 
 
-def format_catalog(subcategories: list[BudgetSubcategory], accounts: list[PersonalExpenseAccount]) -> str:
+def format_catalog(catalog: AssistantCatalog) -> str:
     lines = ["subcategories:"]
-    if subcategories:
-        lines.extend(f"- id: {row.id} name: {row.name} group: {row.group}" for row in subcategories)
+    if catalog.subcategories:
+        lines.extend(
+            f"- id: {row.id} name: {row.name} group: {row.group}" for row in catalog.subcategories
+        )
     else:
         lines.append("- none")
     lines.append("personal_accounts:")
-    if accounts:
-        lines.extend(f"- id: {row.id} name: {row.name}" for row in accounts)
+    if catalog.accounts:
+        lines.extend(f"- id: {row.id} name: {row.name}" for row in catalog.accounts)
+    else:
+        lines.append("- none")
+    lines.append("members:")
+    if catalog.members:
+        for row in catalog.members:
+            suffix = " caller: true" if row.id == catalog.caller_member_id else ""
+            lines.append(f"- id: {row.id} name: {row.name}{suffix}")
+    else:
+        lines.append("- none")
+    lines.append("budget_periods:")
+    if catalog.periods:
+        for row in catalog.periods:
+            suffix = " current: true" if row.id == catalog.current_period_id else ""
+            lines.append(f"- id: {row.id} label_month: {row.label_month}{suffix}")
     else:
         lines.append("- none")
     return "\n".join(lines)
