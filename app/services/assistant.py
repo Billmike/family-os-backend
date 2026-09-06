@@ -101,9 +101,10 @@ def run_turn(
     elif result.tool_name == "list_expenses" and result.tool_args is not None:
         family = db.get(Family, family_id)
         if family is not None:
-            listed = assistant_list.family_list_from_tool(
+            listed = assistant_list.list_from_tool(
                 db,
                 family=family,
+                user=user,
                 catalog=catalog_data,
                 user_text=user_text,
                 tool_args=result.tool_args,
@@ -135,7 +136,7 @@ def _resolve_assistant_text(
         return list_message
     text = (model_text or "").strip()
     if expense_list is not None:
-        return assistant_list.household_list_text(expense_list)
+        return assistant_list.list_text(expense_list)
     if proposal is None:
         return text or assistant_model.DEFAULT_REFUSE
     if text and text != assistant_model.DEFAULT_REFUSE:

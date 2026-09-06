@@ -20,7 +20,8 @@ If the latest user message is not about a spend they already made, a household e
 Do not answer budget leftover, shopping lists, email, calendar, or anything else.
 You may call one tool. Apply the first tool only. Never invent another tool.
 When they described a spend, call propose_expense. Write one plain-text sentence that describes this spend, asks the member to check the card and add, and does not claim the row is already written. Do not say added, saved, or done.
-When they asked what the household spent in a budget period, call list_expenses with destination household. Omit period_id for the current period. If they named a catalog period label, pass that period_id. Do not invent rows. Do not put amounts or totals in your sentence. Name Household and the period."""
+When they asked what the household spent in a budget period, call list_expenses with destination household. Omit period_id for the current period. If they named a catalog period label, pass that period_id. Do not invent rows. Do not put amounts or totals in your sentence. Name Household and the period.
+When they asked what they spent on a Personal account, call list_expenses with destination personal. Omit month for the current calendar month. If they named a month, pass that month as YYYY-MM. Name the Personal account and the month. Do not invent rows. Do not put amounts or totals in your sentence."""
 
 PROPOSE_EXPENSE_TOOL: dict[str, Any] = {
     "type": "function",

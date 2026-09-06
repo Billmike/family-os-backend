@@ -1349,6 +1349,8 @@ Auth + family membership.
 
 When the member asked for a Household Expense list, `expense_list` is the Family outflows for one budget period (current when unnamed). The server loads the rows; `rows` in tool args are ignored. `count` and `total` match those outflow rows. Empty windows still return the card (`count` 0, `total` `"0.00"`). Assistant text names Household and the period and never includes amounts or totals.
 
+When the member asked for a Personal Expense list, `expense_list` is every row on one of the caller’s Personal accounts for one calendar month (current month in the Family timezone when unnamed). A named month (`YYYY-MM` or an English month name) selects that month. Destination follows the same rules as add-expense, including `destination_hint` from the open screen (never `destination_explicit`). Unspecified Destination with Personal accounts and no hint asks Household or Personal and returns no list. One Personal account is used without asking; several without a named account asks which. A partner cannot attach another member’s Personal rows. Assistant text names the Personal account and month and never includes amounts or totals. Empty windows still return the card.
+
 ```json
 {
   "assistant_text": "Here are the household expenses for 2026-09.",
@@ -1380,7 +1382,7 @@ When the member asked for a Household Expense list, `expense_list` is the Family
 }
 ```
 
-No current budget period returns text that Budget is not set up, `expense_list` null, and does not create a period. “Last week” or a date range asks for one period and returns no list.
+No current budget period returns text that Budget is not set up, `expense_list` null, and does not create a period. Named Personal with zero accounts uses the existing Personal-unavailable copy. “Last week” or a date range asks for one month or one period and returns no list.
 
 **Errors:** `401` unauthenticated, `404` not a member, `422` validation, `429` rate limited, `503` unavailable.
 

@@ -114,7 +114,7 @@ def _contains_amount(text: str, amount: Decimal) -> bool:
     return re.search(pattern, haystack) is not None
 
 
-def _contains_token(text: str, token: str | None) -> bool:
+def contains_token(text: str, token: str | None) -> bool:
     if not token:
         return False
     return re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text, re.IGNORECASE) is not None
@@ -175,7 +175,7 @@ def _title_case_merchant_token(token: str) -> str:
 
 
 def destination_from_text(text: str, account_names: list[str]) -> tuple[str | None, bool]:
-    named_account = any(_contains_token(text, name) for name in account_names)
+    named_account = any(contains_token(text, name) for name in account_names)
     if named_account:
         return DESTINATION_PERSONAL, True
     if _contains_phrase(text, HOUSEHOLD_PHRASES):
@@ -216,7 +216,7 @@ def proposal_from_tool(
     account_id = _parse_uuid(args.get("account_id"))
     if account_id not in account_ids:
         account_id = None
-    named_account = next((row for row in accounts if _contains_token(user_text, row.name)), None)
+    named_account = next((row for row in accounts if contains_token(user_text, row.name)), None)
     if destination == DESTINATION_PERSONAL:
         if named_account:
             account_id = named_account.id
@@ -244,11 +244,11 @@ def proposal_from_tool(
         note=note,
         occurred_on=occurred_on,
         destination_explicit=destination_explicit,
-        account_id_explicit=bool(account_name and _contains_token(user_text, account_name)),
+        account_id_explicit=bool(account_name and contains_token(user_text, account_name)),
         amount_explicit=bool(amount is not None and _contains_amount(user_text, amount)),
-        subcategory_id_explicit=bool(subcategory_name and _contains_token(user_text, subcategory_name)),
-        category_explicit=bool(category and _contains_token(user_text, category)),
-        merchant_explicit=bool(merchant and _contains_token(user_text, merchant)),
-        note_explicit=bool(note and _contains_token(user_text, note)),
+        subcategory_id_explicit=bool(subcategory_name and contains_token(user_text, subcategory_name)),
+        category_explicit=bool(category and contains_token(user_text, category)),
+        merchant_explicit=bool(merchant and contains_token(user_text, merchant)),
+        note_explicit=bool(note and contains_token(user_text, note)),
         occurred_on_explicit=bool(occurred_on and occurred_on.isoformat() in user_text),
     )

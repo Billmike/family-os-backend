@@ -1003,6 +1003,8 @@ HOUSEHOLD_EMPTY_LIST = "I didn't find any household expenses in that window."
 HOUSEHOLD_LIST_SEPTEMBER = "Here are the household expenses for 2026-09."
 BUDGET_NOT_SETUP = "Budget is not set up, so I can't show household expenses."
 ASK_ONE_PERIOD = "I can show expenses for one month or one budget period. Which do you want?"
+ASK_DESTINATION = "Do you want household or personal expenses?"
+ASK_WHICH_ACCOUNT = "Which Personal account should I show?"
 
 
 def _list_household_expenses(
@@ -1585,5 +1587,904 @@ def test_list_turn_does_not_block_a_later_add_expense(
     assert proposed.json()["proposal"]["merchant"] == "Tesco"
     assert _period_expenses(client, family_id, owner, period_id) == []
     assert _tasks(client, family_id, owner) == []
+
+
+def _list_personal_expenses(
+    account_id: str | None = None,
+    *,
+    month: str | None = None,
+    assistant_text: str = "",
+    extra_args: dict | None = None,
+) -> AssistantModelResult:
+    args: dict = {
+        "destination": "personal",
+        "account_id": account_id,
+        "month": month,
+        "period_id": None,
+    }
+    if extra_args:
+        args.update(extra_args)
+    return AssistantModelResult(
+        assistant_text=assistant_text,
+        tool_name="list_expenses",
+        tool_args=args,
+    )
+
+
+def _add_personal_expense(
+    client: TestClient,
+    account_id: str,
+    headers: dict,
+    *,
+    amount: str,
+    merchant: str | None,
+    category: str = "Dining",
+    occurred_at: str | None = None,
+    source_type: str = "manual",
+) -> dict:
+    body: dict = {
+        "amount": amount,
+        "category": category,
+        "merchant": merchant,
+        "source_type": source_type,
+    }
+    if occurred_at is not None:
+        body["occurred_at"] = occurred_at
+    created = client.post(
+        f"/api/me/expense-accounts/{account_id}/expenses",
+        headers=headers,
+        json=body,
+    )
+    assert created.status_code == 200, created.text
+    return created.json()
+
+
+def _account_expenses(client: TestClient, account_id: str, headers: dict, month: str) -> list:
+    listed = client.get(
+        f"/api/me/expense-accounts/{account_id}/expenses?month={month}",
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    return listed.json()
+
+
+def _current_month(client: TestClient, headers: dict) -> str:
+    listed = client.get("/api/me/expense-accounts", headers=headers)
+    assert listed.status_code == 200, listed.text
+    return listed.json()["current_month"]
+
+
+def test_named_personal_account_lists_current_month(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-named@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+    before = _account_expenses(client, account_id, owner, month)
+    before_tasks = _tasks(client, family_id, owner)
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is None
+    assert body["task_proposal"] is None
+    assert body["change_proposal"] is None
+    expense_list = body["expense_list"]
+    assert expense_list is not None
+    assert expense_list["destination"] == "personal"
+    assert expense_list["account_id"] == account_id
+    assert expense_list["account_name"] == "Fun"
+    assert expense_list["month"] == month
+    assert expense_list["period_id"] is None
+    assert expense_list["period_label"] is None
+    assert expense_list["count"] == 1
+    assert expense_list["total"] == "12.00"
+    assert expense_list["currency"] == "EUR"
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+    assert expense_list["rows"][0]["merchant"] == "Tesco"
+    assert body["assistant_text"] == f"Here are your Fun expenses for {month}."
+    assert _account_expenses(client, account_id, owner, month) == before
+    assert _tasks(client, family_id, owner) == before_tasks
+
+
+def test_named_month_selects_that_personal_month(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-month@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    current = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{current}-06T10:00:00Z",
+    )
+    aldi = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="15.00",
+        merchant="Aldi",
+        occurred_at="2026-08-15T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(month=current, assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses for 2026-08"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["month"] == "2026-08"
+    assert expense_list["count"] == 1
+    assert expense_list["total"] == "15.00"
+    assert expense_list["rows"][0]["id"] == aldi["id"]
+    assert tesco["id"] not in {row["id"] for row in expense_list["rows"]}
+    assert res.json()["assistant_text"] == "Here are your Fun expenses for 2026-08."
+
+
+def test_named_english_month_selects_that_personal_month(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-august@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    current = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{current}-06T10:00:00Z",
+    )
+    aldi = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="15.00",
+        merchant="Aldi",
+        occurred_at="2026-08-15T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses for August"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["month"] == "2026-08"
+    assert expense_list["count"] == 1
+    assert expense_list["rows"][0]["id"] == aldi["id"]
+    assert tesco["id"] not in {row["id"] for row in expense_list["rows"]}
+    assert res.json()["assistant_text"] == "Here are your Fun expenses for 2026-08."
+
+
+def test_may_as_a_verb_does_not_select_may(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-may-verb@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    current = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{current}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses I may have made"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["month"] == current
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+
+
+def test_for_may_selects_may(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-for-may@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    current = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{current}-06T10:00:00Z",
+    )
+    aldi = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="9.00",
+        merchant="Aldi",
+        occurred_at="2026-05-12T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses for May"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["month"] == "2026-05"
+    assert expense_list["count"] == 1
+    assert expense_list["rows"][0]["id"] == aldi["id"]
+    assert tesco["id"] not in {row["id"] for row in expense_list["rows"]}
+
+
+def test_personal_last_week_or_range_asks_for_one_month_and_returns_no_list(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-range@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(),
+    )
+
+    last_week = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses last week"}],
+    )
+    assert last_week.status_code == 200, last_week.text
+    assert last_week.json()["expense_list"] is None
+    assert last_week.json()["proposal"] is None
+    assert last_week.json()["assistant_text"] == ASK_ONE_PERIOD
+
+    ranged = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "Fun expenses from January through March"}],
+    )
+    assert ranged.status_code == 200, ranged.text
+    assert ranged.json()["expense_list"] is None
+    assert ranged.json()["assistant_text"] == ASK_ONE_PERIOD
+    assert _account_expenses(client, account_id, owner, month) == []
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_personal_list_is_every_row_in_account_and_month_newest_first(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-rows@example.com")
+    family_id = _create_family(client, owner)
+    fun_id = _create_personal_account(client, owner, "Fun")
+    bills_id = _create_personal_account(client, owner, "Bills")
+    month = _current_month(client, owner)
+    older = _add_personal_expense(
+        client,
+        fun_id,
+        owner,
+        amount="8.00",
+        merchant="Miles",
+        category="Transport",
+        occurred_at=f"{month}-01T10:00:00Z",
+    )
+    newer = _add_personal_expense(
+        client,
+        fun_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        category="Dining",
+        occurred_at=f"{month}-06T10:00:00Z",
+        source_type="assistant",
+    )
+    _add_personal_expense(
+        client,
+        fun_id,
+        owner,
+        amount="40.00",
+        merchant="Old shop",
+        occurred_at="2026-08-15T10:00:00Z",
+    )
+    _add_personal_expense(
+        client,
+        bills_id,
+        owner,
+        amount="99.00",
+        merchant="Rent",
+        category="Other",
+        occurred_at=f"{month}-06T12:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["account_id"] == fun_id
+    assert expense_list["count"] == 2
+    assert expense_list["total"] == "20.00"
+    assert expense_list["currency"] == "EUR"
+    assert [row["id"] for row in expense_list["rows"]] == [newer["id"], older["id"]]
+    assert expense_list["rows"][0]["merchant"] == "Tesco"
+    assert expense_list["rows"][0]["amount"] == "12.00"
+    assert expense_list["rows"][0]["category_or_subcategory_label"] == "Dining"
+    assert expense_list["rows"][0]["occurred_on"] == f"{month}-06"
+    assert expense_list["rows"][0]["source_type"] == "assistant"
+    assert expense_list["rows"][0]["writable"] is True
+    assert expense_list["rows"][1]["merchant"] == "Miles"
+    assert expense_list["rows"][1]["category_or_subcategory_label"] == "Transport"
+    assert all(row["merchant"] != "Rent" for row in expense_list["rows"])
+    assert all(row["merchant"] != "Old shop" for row in expense_list["rows"])
+    assert res.json()["assistant_text"] == f"Here are your Fun expenses for {month}."
+    assert "20.00" not in res.json()["assistant_text"]
+    assert len(_account_expenses(client, fun_id, owner, month)) == 2
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_unspecified_destination_with_personal_accounts_and_no_hint_asks(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-ask-dest@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["expense_list"] is None
+    assert body["proposal"] is None
+    assert body["assistant_text"] == ASK_DESTINATION
+    assert _account_expenses(client, account_id, owner, month) != []
+
+
+def test_named_personal_list_with_no_account_uses_unavailable_copy(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-none@example.com")
+    family_id = _create_family(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my personal expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["expense_list"] is None
+    assert body["proposal"] is None
+    assert "personal account" in body["assistant_text"].casefold()
+    personal = client.get("/api/me/expense-accounts", headers=owner)
+    assert personal.json()["accounts"] == []
+    assert personal.json()["current_month_count"] == 0
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_one_personal_account_and_personal_destination_lists_that_account(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-one@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my personal expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["destination"] == "personal"
+    assert expense_list["account_id"] == account_id
+    assert expense_list["account_name"] == "Fun"
+    assert expense_list["count"] == 1
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+    assert res.json()["assistant_text"] == f"Here are your Fun expenses for {month}."
+
+
+def test_several_personal_accounts_without_named_account_asks_which(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-which@example.com")
+    family_id = _create_family(client, owner)
+    fun_id = _create_personal_account(client, owner, "Fun")
+    _create_personal_account(client, owner, "Bills")
+    month = _current_month(client, owner)
+    _add_personal_expense(
+        client,
+        fun_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(account_id=fun_id),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my personal expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["expense_list"] is None
+    assert body["proposal"] is None
+    assert body["assistant_text"] == ASK_WHICH_ACCOUNT
+    assert _account_expenses(client, fun_id, owner, month) != []
+    assert _tasks(client, family_id, owner) == []
+
+
+def test_several_personal_accounts_naming_the_account_selects_it(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-named-of-many@example.com")
+    family_id = _create_family(client, owner)
+    fun_id = _create_personal_account(client, owner, "Fun")
+    bills_id = _create_personal_account(client, owner, "Bills")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        fun_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    _add_personal_expense(
+        client,
+        bills_id,
+        owner,
+        amount="40.00",
+        merchant="Rent",
+        category="Other",
+        occurred_at=f"{month}-06T12:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(account_id=bills_id),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["account_id"] == fun_id
+    assert expense_list["account_name"] == "Fun"
+    assert expense_list["count"] == 1
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+    assert all(row["merchant"] != "Rent" for row in expense_list["rows"])
+
+
+def test_destination_hint_personal_with_one_account_lists_that_account(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-hint@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: AssistantModelResult(
+            assistant_text="",
+            tool_name="list_expenses",
+            tool_args={
+                "destination": None,
+                "account_id": None,
+                "month": None,
+                "period_id": None,
+            },
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show expenses"}],
+        destination_hint="personal",
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is None
+    expense_list = body["expense_list"]
+    assert expense_list is not None
+    assert expense_list["destination"] == "personal"
+    assert expense_list["account_id"] == account_id
+    assert expense_list["account_name"] == "Fun"
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+    assert "destination_explicit" not in expense_list
+    assert body["assistant_text"] == f"Here are your Fun expenses for {month}."
+
+
+def test_destination_hint_personal_with_several_accounts_asks_which(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-hint-several@example.com")
+    family_id = _create_family(client, owner)
+    _create_personal_account(client, owner, "Fun")
+    _create_personal_account(client, owner, "Bills")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: AssistantModelResult(
+            assistant_text="",
+            tool_name="list_expenses",
+            tool_args={
+                "destination": None,
+                "account_id": None,
+                "month": None,
+                "period_id": None,
+            },
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show expenses"}],
+        destination_hint="personal",
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["expense_list"] is None
+    assert body["proposal"] is None
+    assert body["assistant_text"] == ASK_WHICH_ACCOUNT
+
+
+def test_destination_hint_household_with_personal_accounts_lists_household(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-hint-household@example.com")
+    family_id = _create_family(client, owner)
+    _create_personal_account(client, owner, "Fun")
+    period_id = _create_current_period(client, family_id, owner, "2026-09")
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: AssistantModelResult(
+            assistant_text="",
+            tool_name="list_expenses",
+            tool_args={
+                "destination": None,
+                "account_id": None,
+                "month": None,
+                "period_id": None,
+            },
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show expenses"}],
+        destination_hint="household",
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["proposal"] is None
+    expense_list = body["expense_list"]
+    assert expense_list is not None
+    assert expense_list["destination"] == "household"
+    assert expense_list["period_id"] == period_id
+    assert expense_list["account_id"] is None
+    assert body["assistant_text"] == HOUSEHOLD_EMPTY_LIST
+
+
+def test_personal_list_empty_window_still_returns_card(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-empty@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(assistant_text=""),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["count"] == 0
+    assert expense_list["total"] == "0.00"
+    assert expense_list["rows"] == []
+    assert res.json()["assistant_text"] == "I didn't find any Fun expenses in that window."
+    assert res.json()["assistant_text"] != REFUSE_TEXT
+    assert _account_expenses(client, account_id, owner, month) == []
+
+
+def test_personal_list_assistant_text_never_names_amounts_or_totals(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-amounts@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="45.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(
+            assistant_text="Your Fun total is €45.00 this month.",
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    text = res.json()["assistant_text"]
+    assert text == f"Here are your Fun expenses for {month}."
+    assert "45.00" not in text
+    assert "€" not in text
+    assert "total" not in text.casefold()
+
+
+def test_partner_cannot_attach_caller_personal_expenses(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-owner@example.com")
+    family_id = _create_family(client, owner)
+    partner = _invite_partner(client, owner, family_id, "assistant-personal-partner@example.com")
+    owner_account_id = _create_personal_account(client, owner, "Owner cash")
+    partner_account_id = _create_personal_account(client, partner, "Partner cash")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        owner_account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    coffee = _add_personal_expense(
+        client,
+        partner_account_id,
+        partner,
+        amount="4.00",
+        merchant="Café",
+        occurred_at=f"{month}-06T11:00:00Z",
+    )
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(account_id=owner_account_id),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        partner,
+        [{"role": "user", "content": "show my personal expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["account_id"] == partner_account_id
+    assert expense_list["account_name"] == "Partner cash"
+    assert expense_list["count"] == 1
+    assert expense_list["rows"][0]["id"] == coffee["id"]
+    assert tesco["id"] not in {row["id"] for row in expense_list["rows"]}
+    assert all(row["merchant"] != "Tesco" for row in expense_list["rows"])
+
+
+def test_personal_list_ignores_tool_rows_and_foreign_account_id(
+    client: TestClient,
+    assistant_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = auth_headers(client, "assistant-personal-ignore-rows@example.com")
+    family_id = _create_family(client, owner)
+    account_id = _create_personal_account(client, owner, "Fun")
+    month = _current_month(client, owner)
+    tesco = _add_personal_expense(
+        client,
+        account_id,
+        owner,
+        amount="12.00",
+        merchant="Tesco",
+        occurred_at=f"{month}-06T10:00:00Z",
+    )
+    fake_row_id = "00000000-0000-0000-0000-000000000099"
+    monkeypatch.setattr(
+        "app.services.assistant_model.complete_assistant_turn",
+        lambda **_kwargs: _list_personal_expenses(
+            extra_args={
+                "rows": [
+                    {
+                        "id": fake_row_id,
+                        "merchant": "Hallucinated",
+                        "amount": "1.00",
+                    }
+                ],
+                "count": 1,
+                "total": "1.00",
+            },
+        ),
+    )
+
+    res = _propose(
+        client,
+        family_id,
+        owner,
+        [{"role": "user", "content": "show my Fun expenses"}],
+    )
+    assert res.status_code == 200, res.text
+    expense_list = res.json()["expense_list"]
+    assert expense_list is not None
+    assert expense_list["account_id"] == account_id
+    assert expense_list["count"] == 1
+    assert expense_list["total"] == "12.00"
+    assert expense_list["rows"][0]["id"] == tesco["id"]
+    assert fake_row_id not in {row["id"] for row in expense_list["rows"]}
+    assert all(row["merchant"] != "Hallucinated" for row in expense_list["rows"])
 
 
