@@ -18,6 +18,14 @@ from app.core.database import Base, get_db
 from app.main import app as fastapi_app
 from app.workers.reminders import stop_scheduler
 import app.models  # noqa: F401
+from app.core.rate_limit import reset_ip_limiter
+
+
+@pytest.fixture(autouse=True)
+def clear_reset_ip_limiter() -> Generator[None, None, None]:
+    reset_ip_limiter.clear()
+    yield
+    reset_ip_limiter.clear()
 
 
 @pytest.fixture()

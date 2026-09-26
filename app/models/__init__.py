@@ -9,10 +9,12 @@ from app.models.receipt import Receipt, ReceiptItem
 from app.models.shopping import ShoppingItem, ShoppingList, ShoppingLocation
 from app.models.shopping_session import ShoppingSession, ShoppingSessionItem
 from app.models.task import Task, TaskAssignee
+from app.models.password_reset import PasswordResetToken
 from app.models.user import User
 
 __all__ = [
     "User",
+    "PasswordResetToken",
     "Family",
     "FamilyMember",
     "FamilyInvitation",

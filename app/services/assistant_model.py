@@ -194,7 +194,7 @@ def complete_assistant_turn(*, messages: list[dict[str, str]], catalog: str = ""
         )
     except Exception as exc:
         raise service_unavailable(
-            "Ask assistant is unavailable right now.",
+            "Heimdall is unavailable right now.",
             code="assistant_unavailable",
         ) from exc
     if not response.choices:

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
-from sqlalchemy import DateTime, String, Text, Uuid, func
+from sqlalchemy import DateTime, Integer, String, Text, Uuid, func
 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,8 +33,12 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     timezone: Mapped[str | None] = mapped_column(String, nullable=True)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     members = relationship("FamilyMember", back_populates="user")
+    password_reset_tokens = relationship(
+        "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
+    )
     notification_preferences = relationship(
         "NotificationPreference", back_populates="user", uselist=False
     )

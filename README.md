@@ -61,8 +61,8 @@ uv run pytest -q
 
 1. Provision managed PostgreSQL and set `DATABASE_URL=postgresql+psycopg://...`.
 2. Set a unique `JWT_SECRET` (≥32 chars; startup fails on placeholders). Set `CORS_ORIGINS` to your PWA origin(s).
-3. Set `PUBLIC_APP_URL` to the public web app origin (used in invitation links, e.g. `https://app.example.com`).
-4. `EMAIL_PROVIDER=log` (default) only logs invitation emails; plug in a real provider later.
+3. Set `PUBLIC_APP_URL` to the public web app origin (used in invitation and password-reset links, e.g. `https://app.example.com`).
+4. For real mail set `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, and `EMAIL_FROM` (default `FamilyOS <noreply@stacklessdev.com>`). Leave `EMAIL_PROVIDER=log` for local/CI (messages are logged, not delivered).
 5. Generate VAPID keys for Web Push. Keep `private_key.pem` locally and set env from:
    `python -m scripts.print_vapid_env` → copy the short `VAPID_PRIVATE_KEY` (raw base64url) and matching `VAPID_PUBLIC_KEY`.
    Do **not** paste PEM into Sevalla for `VAPID_PRIVATE_KEY` — pywebpush rejects PEM strings (ASN.1 error).

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import decode_token
 from app.models.family import FamilyMember
+from app.models.user import User
 from app.realtime.hub import hub
 
 router = APIRouter(tags=["realtime"])
@@ -19,20 +20,24 @@ async def family_ws(
     db: Session = Depends(get_db),
 ) -> None:
     try:
-        user_id = decode_token(token, "access")
+        claims = decode_token(token, "access")
     except ValueError:
+        await websocket.close(code=4401)
+        return
+    user = db.get(User, claims.user_id)
+    if user is None or user.token_version != claims.token_version:
         await websocket.close(code=4401)
         return
     member = (
         db.query(FamilyMember)
-        .filter(FamilyMember.family_id == family_id, FamilyMember.user_id == user_id)
+        .filter(FamilyMember.family_id == family_id, FamilyMember.user_id == user.id)
         .first()
     )
     if member is None:
         await websocket.close(code=4403)
         return
 
-    await hub.connect(family_id, user_id, websocket)
+    await hub.connect(family_id, user.id, websocket)
     try:
         while True:
             # Keep-alive / ignore client messages
@@ -40,4 +45,4 @@ async def family_ws(
     except WebSocketDisconnect:
         pass
     finally:
-        await hub.disconnect(family_id, user_id, websocket)
+        await hub.disconnect(family_id, user.id, websocket)

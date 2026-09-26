@@ -36,7 +36,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8001";
 | Header | When |
 |--------|------|
 | `Content-Type: application/json` | All JSON request bodies |
-| `Authorization: Bearer <access_token>` | All authenticated routes (everything except register, login, refresh, health) |
+| `Authorization: Bearer <access_token>` | All authenticated routes (everything except register, login, refresh, forgot-password, reset-password, health) |
 
 ### IDs and times
 
@@ -147,6 +147,48 @@ No auth.
 **Response `200`** — token pair.
 
 **Errors:** `401` invalid credentials.
+
+---
+
+### `POST /api/auth/forgot-password`
+
+No auth. Always returns `200` with `{}` whether or not the email has a User. Does not create a User. At most one email per User per 15 minutes; extra requests still return `200`. Also capped per client IP.
+
+**Request**
+
+```json
+{
+  "email": "kayode@familyos.app"
+}
+```
+
+The mail (when `EMAIL_PROVIDER=resend` and `RESEND_API_KEY` is set) contains a one-hour, single-use link: `PUBLIC_APP_URL` + `/reset/{token}`. The raw token is never returned in the API. Local/CI with `EMAIL_PROVIDER=log` only logs the message.
+
+---
+
+### `POST /api/auth/reset-password`
+
+No auth.
+
+**Request**
+
+```json
+{
+  "token": "<raw token from the email link>",
+  "password": "newpassword1"
+}
+```
+
+| Field | Rules |
+|-------|--------|
+| `token` | Raw token from the reset URL |
+| `password` | Same rules as register (8–128 chars, max 72 UTF-8 bytes) |
+
+**Response `200`** — token pair. Signs the User in. Invalidates all existing access/refresh tokens for that User.
+
+**Errors:** `400` `{ "detail": "This link is invalid or expired.", "code": "invalid_reset_link" }` for used, expired, or unknown tokens (same copy). `422` validation.
+
+Successful login also cancels any outstanding reset links for that User.
 
 ---
 
@@ -365,7 +407,7 @@ Auth + membership. Owner/Parent only.
 
 Show `invite_token` / `invite_url` to the user once. The server stores only a hash.
 
-`invite_url` is built from `PUBLIC_APP_URL` + `/invite/{token}`. If `email` is provided it is stored and a stub mailer may log the message; **email is not delivered** until a real `EMAIL_PROVIDER` is configured. Always share the link.
+`invite_url` is built from `PUBLIC_APP_URL` + `/invite/{token}`. If `email` is provided it is stored and the mailer sends the invite when `EMAIL_PROVIDER=resend` (with `RESEND_API_KEY`) is configured; `EMAIL_PROVIDER=log` only logs. Always share the link.
 
 ---
 

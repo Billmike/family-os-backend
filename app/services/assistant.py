@@ -37,7 +37,7 @@ def is_assistant_available() -> bool:
 def require_assistant_available() -> None:
     if not is_assistant_available():
         raise service_unavailable(
-            "Ask assistant is not configured. Set OPENAI_API_KEY to enable it.",
+            "Heimdall is not configured. Set OPENAI_API_KEY to enable it.",
             code="assistant_unavailable",
         )
 

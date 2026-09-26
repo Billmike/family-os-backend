@@ -14,6 +14,17 @@ from app.models.user import User
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def user_from_token(db: Session, token: str, expected_type: str) -> User:
+    try:
+        claims = decode_token(token, expected_type)
+    except ValueError as exc:
+        raise unauthorized(str(exc)) from exc
+    user = db.get(User, claims.user_id)
+    if user is None or user.token_version != claims.token_version:
+        raise unauthorized("Invalid token")
+    return user
+
+
 class FamilyRole(StrEnum):
     OWNER = "Owner"
     PARENT = "Parent"
@@ -26,14 +37,7 @@ def get_current_user(
 ) -> User:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise unauthorized()
-    try:
-        user_id = decode_token(credentials.credentials, "access")
-    except ValueError as exc:
-        raise unauthorized(str(exc)) from exc
-    user = db.get(User, user_id)
-    if user is None:
-        raise unauthorized("User not found")
-    return user
+    return user_from_token(db, credentials.credentials, "access")
 
 
 def get_membership(db: Session, family_id: UUID, user_id: UUID) -> FamilyMember:

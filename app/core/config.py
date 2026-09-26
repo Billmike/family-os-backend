@@ -29,8 +29,11 @@ class Settings(BaseSettings):
     environment: str = "development"
     invitation_expire_days: int = 7
     public_app_url: str = "http://localhost:3000"
-    # log = stdout stub; future: resend, sendgrid, etc.
+    # log = stdout stub; resend when RESEND_API_KEY is set
     email_provider: str = "log"
+    resend_api_key: str = ""
+    email_from: str = "FamilyOS <noreply@stacklessdev.com>"
+    password_reset_expire_minutes: int = 60
     openai_api_key: str = ""
     openai_model: str = "gpt-5.6-luna"
     receipt_scanning_enabled: bool = True
