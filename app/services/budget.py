@@ -601,6 +601,27 @@ def delete_budget(db: Session, budget: Budget) -> None:
             pass
 
 
+def settlement_occurred_at(
+    tz_name: str,
+    *,
+    start_date: date,
+    end_date: date,
+    at: datetime,
+) -> datetime:
+    """Stamp a Settlement at `at` when that instant is inside the Budget period.
+
+    Outside the period, clamp to noon family-local on the near boundary:
+    the start date when `at` is earlier, the end date when `at` is later.
+    """
+    zone = family_zone(tz_name)
+    instant = ensure_aware(at).astimezone(zone)
+    start, end_exclusive = period_bounds(tz_name, start_date, end_date)
+    if start <= instant < end_exclusive:
+        return instant
+    boundary = start_date if instant < start else end_date
+    return datetime(boundary.year, boundary.month, boundary.day, 12, 0, tzinfo=zone)
+
+
 def settle_budget(
     db: Session,
     family: Family,
@@ -619,15 +640,11 @@ def settle_budget(
         return period_to_out(db, family, period)
 
     sub = subcategory_service.get_subcategory_any(db, budget.subcategory_id)
-    # Settle on the period end date at noon family-local so it falls inside the cycle
-    zone = family_zone(family.timezone)
-    occurred_at = datetime(
-        period.end_date.year,
-        period.end_date.month,
-        period.end_date.day,
-        12,
-        0,
-        tzinfo=zone,
+    occurred_at = settlement_occurred_at(
+        family.timezone,
+        start_date=period.start_date,
+        end_date=period.end_date,
+        at=datetime.now(timezone.utc),
     )
     expense = Expense(
         family_id=family.id,

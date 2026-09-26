@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from app.models.family import Family
 from app.models.user import User
 from app.services import budget as budget_service
 from app.services import budget_subcategory as subcategory_service
-from app.services.budget import derive_state
+from app.services.budget import derive_state, settlement_occurred_at
 from tests.conftest import auth_headers
 
 
@@ -182,6 +183,141 @@ def test_create_period_with_subcategories(client: TestClient) -> None:
     assert body["summary"]["total_expenses_expected"] == "400.00"
     assert body["summary"]["left_over_expected"] == "2600.00"
     assert len(income_group["subcategories"]) >= 0
+
+
+def _as_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _family_wall(value: str, tz_name: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=None)
+    return parsed.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+
+
+def test_settlement_occurred_at_uses_instant_inside_period() -> None:
+    start = date(2026, 10, 1)
+    end = date(2026, 10, 31)
+    at = datetime(2026, 10, 6, 15, 30, tzinfo=timezone.utc)
+    occurred = settlement_occurred_at("UTC", start_date=start, end_date=end, at=at)
+    assert occurred == at
+
+
+def test_settlement_occurred_at_clamps_to_family_local_boundary() -> None:
+    start = date(2026, 10, 1)
+    end = date(2026, 10, 31)
+    before = datetime(2026, 10, 1, 6, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 11, 1, 7, 0, tzinfo=timezone.utc)
+    zone = ZoneInfo("America/Los_Angeles")
+
+    clamped_start = settlement_occurred_at(
+        "America/Los_Angeles", start_date=start, end_date=end, at=before
+    )
+    clamped_end = settlement_occurred_at(
+        "America/Los_Angeles", start_date=start, end_date=end, at=after
+    )
+
+    assert clamped_start == datetime(2026, 10, 1, 12, 0, tzinfo=zone)
+    assert clamped_end == datetime(2026, 10, 31, 12, 0, tzinfo=zone)
+
+
+def test_settle_dates_expense_at_the_settle_instant(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-settle-now@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Settle Now Family", "timezone": "UTC"},
+    ).json()["id"]
+    rent = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_FIXED, "name": "Rent"},
+    ).json()
+    today = date.today()
+    end = today + timedelta(days=20)
+    before = datetime.now(timezone.utc)
+    period = client.post(
+        f"/api/families/{family_id}/budget-periods",
+        headers=headers,
+        json={
+            "start_date": today.isoformat(),
+            "end_date": end.isoformat(),
+            "budgets": [{"subcategory_id": rent["id"], "amount": "100.00"}],
+        },
+    ).json()
+    line = next(l for g in period["groups"] for l in g["lines"] if l["subcategory_id"] == rent["id"])
+    settled = client.post(f"/api/budgets/{line['id']}/settle", headers=headers)
+    after = datetime.now(timezone.utc)
+    assert settled.status_code == 200, settled.text
+    settled_line = next(l for g in settled.json()["groups"] for l in g["lines"] if l["id"] == line["id"])
+    assert settled_line["settled"] is True
+    assert settled_line["used"] == "100.00"
+
+    expenses = client.get(
+        f"/api/families/{family_id}/expenses",
+        headers=headers,
+        params={"period_id": period["id"]},
+    ).json()
+    assert len(expenses) == 1
+    assert expenses[0]["source_type"] == "budget_line"
+    occurred = _as_utc(expenses[0]["occurred_at"])
+    assert before <= occurred <= after
+    assert occurred.date() != end
+
+
+def test_settle_clamps_outside_period(client: TestClient) -> None:
+    headers = auth_headers(client, "budget-settle-clamp@example.com", name="Owner")
+    family_id = client.post(
+        "/api/families",
+        headers=headers,
+        json={"name": "Settle Clamp Family", "timezone": "America/Los_Angeles"},
+    ).json()["id"]
+    rent = client.post(
+        f"/api/families/{family_id}/budget-subcategories",
+        headers=headers,
+        json={"group": GROUP_FIXED, "name": "Rent"},
+    ).json()
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    ended_start = today - timedelta(days=40)
+    ended_end = today - timedelta(days=10)
+    upcoming_start = today + timedelta(days=10)
+    upcoming_end = today + timedelta(days=40)
+
+    def settle_period(start: date, end: date) -> tuple[str, str]:
+        period = client.post(
+            f"/api/families/{family_id}/budget-periods",
+            headers=headers,
+            json={
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "budgets": [{"subcategory_id": rent["id"], "amount": "80.00"}],
+            },
+        ).json()
+        line = next(l for g in period["groups"] for l in g["lines"] if l["subcategory_id"] == rent["id"])
+        settled = client.post(f"/api/budgets/{line['id']}/settle", headers=headers)
+        assert settled.status_code == 200, settled.text
+        settled_line = next(l for g in settled.json()["groups"] for l in g["lines"] if l["id"] == line["id"])
+        assert settled_line["used"] == "80.00"
+        expenses = client.get(
+            f"/api/families/{family_id}/expenses",
+            headers=headers,
+            params={"period_id": period["id"]},
+        ).json()
+        assert len(expenses) == 1
+        return period["id"], expenses[0]["occurred_at"]
+
+    _, ended_at = settle_period(ended_start, ended_end)
+    _, upcoming_at = settle_period(upcoming_start, upcoming_end)
+    assert _family_wall(ended_at, "America/Los_Angeles") == datetime(
+        ended_end.year, ended_end.month, ended_end.day, 12, 0
+    )
+    assert _family_wall(upcoming_at, "America/Los_Angeles") == datetime(
+        upcoming_start.year, upcoming_start.month, upcoming_start.day, 12, 0
+    )
 
 
 def test_settle_and_unsettle(client: TestClient) -> None:
